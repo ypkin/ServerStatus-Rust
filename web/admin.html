@@ -36,7 +36,6 @@ label{display:inline-block;min-width:96px}
 <div id="app">
   <div class="nav">
     <button data-view="nodes" onclick="showView('nodes')">节点</button>
-    <button data-view="groups" onclick="showView('groups')">分组</button>
     <button data-view="traffic" onclick="showView('traffic')">流量</button>
     <button data-view="ping" onclick="showView('ping')">探针</button>
     <button data-view="pushplus" onclick="showView('pushplus')">推送</button>
@@ -62,7 +61,6 @@ label{display:inline-block;min-width:96px}
       <h3 id="hostFormTitle">添加节点</h3>
       <label>节点名 *</label><input id="f_name" placeholder="如 cheap3"> <label>密码 *</label><input id="f_pass" placeholder="添加时必填；编辑时留空不改">
       <label>显示名</label><input id="f_alias" placeholder="默认同节点名"><br>
-      <label>模板分组</label><select id="h_gid"><option value="">（不分组，单节点）</option></select>
       <label>服务器分组 Tag</label><input id="f_tag" placeholder="如 Stable，空为默认组"><br>
       <label>地区</label><input id="f_location"> <label>类型</label><input id="f_type" placeholder="如 kvm">
       <label>排序</label><input id="f_weight" type="number" min="0" placeholder="留空自动"><br>
@@ -73,20 +71,6 @@ label{display:inline-block;min-width:96px}
       <label>备注</label><input id="f_note" size="40" placeholder="仅后台可见"> <label>公开备注</label><input id="f_pnote" size="40" placeholder="显示在主面板卡片上"><br>
       <button onclick="saveHostForm()">保存</button> <button onclick="closeHostForm()">取消</button>
       <div id="newInstall" class="mono" style="display:none"></div>
-    </div>
-  </div>
-
-  <div id="view-groups" class="view">
-    <h2>分组（动态注册模板：客户端用 -g 分组名 -p 分组密码接入，主机自动出现在节点表）</h2>
-    <div id="groups"></div>
-    <div class="card">
-      <h3>添加分组</h3>
-      <label>分组名 *</label><input id="g_gid" placeholder="如 hk"> <label>密码 *</label><input id="g_pass">
-      <label>地区</label><input id="g_location"> <label>类型</label><input id="g_type"><br>
-      <label>流量限额 GiB</label><input id="g_limit" type="number" min="0" value="0">
-      <label>计费模式</label><select id="g_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select><br>
-      <label>开始日期</label><input id="g_start" type="date"> <label>年费 ($)</label><input id="g_fee" type="number" step="0.01" min="0"> <label>带宽 Mbps</label><input id="g_bw" type="number" min="0">
-      <button onclick="addGroup()">添加分组</button>
     </div>
   </div>
 
@@ -146,7 +130,7 @@ label{display:inline-block;min-width:96px}
     <h2>设置</h2>
     <div class="card">
       <p>当前登录账号：admin</p>
-      <p>主面板：<a href="/">打开主面板</a>；节点、分组、流量、探针、推送的设置分别在各自视图里改。</p>
+      <p>主面板：<a href="/">打开主面板</a>；节点、流量、探针、推送的设置分别在各自视图里改。</p>
       <button onclick="logout()">退出登录</button>
     </div>
   </div>
@@ -223,7 +207,7 @@ function backToLogin(msg) {
   if (msg) $('loginMsg').textContent = msg;
 }
 function logout(){ backToLogin(); }
-async function loadAll(){ try { await Promise.all([loadHosts(), loadGroups(), loadTraffic(), loadPing(), loadPingOverview(), loadPushPlus()]); } catch(e){
+async function loadAll(){ try { await Promise.all([loadHosts(), loadTraffic(), loadPing(), loadPingOverview(), loadPushPlus()]); } catch(e){
   // A stale/invalid token used to leave the user staring at empty tables.
   // Bounce back to the login form instead so they can sign in again.
   if (String(e.message).includes('Invalid token')) backToLogin('登录已失效，请重新登录');
@@ -320,7 +304,6 @@ function openHostForm(mode, name){
     set('f_limit','0'); $('f_mode').value='sum'; set('f_ms','1');
     set('f_start',''); set('f_fee',''); set('f_bw',''); set('f_note',''); set('f_pnote','');
     $('f_name').readOnly = false; $('f_pass').placeholder = '客户端密码（必填）';
-    $('h_gid').disabled = false;
   } else {
     const h = allHosts.find(x => x.name === name);
     if (!h) { showMsg('节点不存在', false); return; }
@@ -330,14 +313,6 @@ function openHostForm(mode, name){
     set('f_start', h.plan_start_date||''); set('f_fee', h.annual_fee||0); set('f_bw', h.bandwidth_mbps||0);
     set('f_note', h.note||''); set('f_pnote', h.public_note||'');
     $('f_name').readOnly = true; $('f_pass').placeholder = '留空不改';
-    // Template membership (gid) is not changed via edit: changing it
-    // would move the host between auth templates. Show it read-only.
-    $('h_gid').disabled = true;
-    const sel = $('h_gid');
-    if (h.gid && ![...sel.options].some(o => o.value === h.gid)) {
-      const o = document.createElement('option'); o.value = h.gid; o.textContent = h.gid + '（当前模板）'; sel.appendChild(o);
-    }
-    sel.value = h.gid || '';
   }
   card.style.display='block'; card.scrollIntoView();
 }
@@ -362,7 +337,7 @@ async function saveHostForm(){
       if (!name) { showMsg('节点名不能为空', false); return; }
       const pw = $('f_pass').value;
       if (!pw) { showMsg('添加时密码不能为空', false); return; }
-      const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), gid:$('h_gid').value, tag:v('f_tag'),
+      const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
         plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), bandwidth_mbps:parseInt($('f_bw').value)||0,
         note:v('f_note'), public_note:v('f_pnote')};
@@ -386,16 +361,6 @@ async function showInstall(name) {
 async function delHost(name) {
   if (!confirm('删除节点 '+name+'？删除后该节点立即从面板下线；其客户端会鉴权失败，需另行停掉。')) return;
   try { const j = await api('/api/admin/hosts/'+encodeURIComponent(name),'DELETE'); showMsg('已删除 '+name+(j.note?'（'+j.note+'）':'')); loadHosts(); loadTraffic(); } catch(e){ showMsg('删除失败：'+e.message, false); }
-}
-async function loadGroups() {
-  const groups = await api('/api/admin/groups');
-  const sel = $('h_gid');
-  sel.innerHTML = '<option value="">（不分组，单节点）</option>' + groups.map(g=>'<option value="'+g.gid+'">'+g.gid+'（'+g.member_count+' 台，来源 '+g.source+'）</option>').join('');
-  let html = '<table><tr><th>分组</th><th>地区/类型</th><th>成员</th><th>限额 GiB</th><th>来源</th><th>操作</th></tr>';
-  for (const g of groups) {
-    html += '<tr><td>'+g.gid+'</td><td>'+g.location+' / '+g.type+'</td><td>'+g.member_count+'</td><td>'+Math.round(g.traffic_limit/GiB)+'</td><td>'+g.source+'</td><td><button onclick="delGroup(\''+g.gid+'\')">删除</button></td></tr>';
-  }
-  $('groups').innerHTML = html + '<p class="hint">删除分组不踢出已注册成员；要彻底清掉需再逐个删除节点，或停掉客户端。</p>';
 }
 let trafficData = [];
 async function loadTraffic() {
@@ -490,24 +455,6 @@ async function loadPushPlus() {
   $('pp_enabled').checked = !!p.enabled; $('pp_title').value = p.title||''; $('pp_channel').value = p.channel||'';
   $('pp_offline').value = p.offline_tpl||''; $('pp_online').value = p.online_tpl||'';
   $('pp_token_set').textContent = p.token_set ? '（已设置 token，留空不改）' : '（未设置 token）';
-}
-async function addGroup() {
-  // Frontend required-field checks: the server rejects an empty group
-  // password with 400, but when the tab's token is ALSO stale the auth
-  // layer answers 403 first and the user sees "Invalid token" instead
-  // of the real problem. Say plainly what is missing, before any call.
-  const gid = $('g_gid').value.trim();
-  const pw = $('g_pass').value;
-  if (!gid) { showMsg('请填写分组名', false); return; }
-  if (!pw) { showMsg('请填写分组密码（客户端用分组名 + 分组密码接入，分组密码不能为空）', false); return; }
-  try {
-    await api('/api/admin/groups','POST',{gid:gid, password:pw, location:$('g_location').value.trim(), type:$('g_type').value.trim(), traffic_limit:Math.round(parseFloat($('g_limit').value||0)*GiB), traffic_mode:$('g_mode').value, plan_start_date:$('g_start').value, annual_fee:parseFloat($('g_fee').value||0), bandwidth_mbps:parseInt($('g_bw').value||0)});
-    showMsg('分组已添加；客户端用 -g '+$('g_gid').value+' -p 分组密码接入'); loadGroups();
-  } catch(e){ showMsg('添加失败：'+e.message, false); }
-}
-async function delGroup(gid) {
-  if (!confirm('删除分组 '+gid+'？已注册成员不会自动下线。')) return;
-  try { await api('/api/admin/groups/'+encodeURIComponent(gid),'DELETE'); showMsg('分组已删除'); loadGroups(); loadHosts(); } catch(e){ showMsg('删除失败：'+e.message, false); }
 }
 async function savePushPlus() {
   try { await api('/api/admin/notify/pushplus','PUT',{enabled:$('pp_enabled').checked, token:$('pp_token').value, title:$('pp_title').value.trim(), channel:$('pp_channel').value.trim(), offline_tpl:$('pp_offline').value, online_tpl:$('pp_online').value}); showMsg('PushPlus 设置已保存'); $('pp_token').value=''; loadPushPlus(); } catch(e){ showMsg('保存失败：'+e.message, false); }
