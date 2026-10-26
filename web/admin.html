@@ -24,6 +24,7 @@ label{display:inline-block;min-width:96px}
 .nav .spacer{flex:1}
 .view{display:none}.view.active{display:block}
 .flag{font-size:16px}
+.pen{color:#16a34a;background:none;border:0;cursor:pointer;font-size:15px;padding:0 2px;line-height:1}
 </style>
 </head>
 <body>
@@ -238,7 +239,7 @@ async function loadHosts() {
   if (tags.includes(cur)) sel.value = cur; else sel.value = '';
   const want = sel.value;
   const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
-  let html = '<table><tr><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>排序</th><th>节点</th><th>显示名</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费 ($)</th><th>带宽 Mbps</th><th>备注</th><th>公开备注</th><th>操作</th></tr>';
+  let html = '<table><tr><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>排序</th><th>节点</th><th>显示名</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费 ($)</th><th>带宽 Mbps</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
   for (const h of rows) {
     const st = statsByName[h.name] || {};
     const flag = flagFor(st.country_code, h.location);
@@ -252,8 +253,9 @@ async function loadHosts() {
       + '<td>'+esc(h.location)+' / '+esc(h.type)+'</td>'
       + '<td>'+Math.round(h.traffic_limit/GiB)+'</td><td>'+esc(h.traffic_mode)+'</td><td>'+h.monthstart+'</td>'
       + '<td>'+esc(h.plan_start_date||'')+'</td><td>'+(h.annual_fee||0)+'</td><td>'+(h.bandwidth_mbps||0)+'</td>'
-      + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+'</td>'
-      + '<td><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="showInstall(\''+h.name+'\')">一键命令</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
+      + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+' <button class="pen" title="修改公开备注" onclick="editPublicNote(\''+h.name+'\')">✎</button></td>'
+      + '<td><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
+      + '<td><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
   }
   $('hosts').innerHTML = html + '</table>';
 }
@@ -361,6 +363,18 @@ async function showInstall(name) {
 async function delHost(name) {
   if (!confirm('删除节点 '+name+'？删除后该节点立即从面板下线；其客户端会鉴权失败，需另行停掉。')) return;
   try { const j = await api('/api/admin/hosts/'+encodeURIComponent(name),'DELETE'); showMsg('已删除 '+name+(j.note?'（'+j.note+'）':'')); loadHosts(); loadTraffic(); } catch(e){ showMsg('删除失败：'+e.message, false); }
+}
+// Direct public-note edit from the green pen in the note column. The
+// current text is looked up from allHosts (never interpolated into the
+// onclick attribute, so quotes in free text cannot break out), and the
+// PUT goes through the same host endpoint as the edit form; the report
+// thread copies it into HostStat, so the overlay detail shows it.
+async function editPublicNote(name) {
+  const h = allHosts.find(x => x.name === name);
+  if (!h) { showMsg('节点不存在', false); return; }
+  const val = prompt('修改公开备注（显示在主面板卡片上，留空则清除）：', h.public_note || '');
+  if (val === null) return;
+  try { await api('/api/admin/hosts/'+encodeURIComponent(name),'PUT',{public_note: val}); showMsg('公开备注已修改'); loadHosts(); } catch(e){ showMsg('修改失败：'+e.message, false); }
 }
 let trafficData = [];
 async function loadTraffic() {
