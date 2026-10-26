@@ -704,6 +704,28 @@
       var td = div.closest('td');
       if (!td || handled.has(td)) return;
       handled.add(td);
+      // React's own expand row, computed once per row (reused by the
+      // indicator and the detail attach below). React toggles
+      // expansion on a WHOLE-ROW click (bundle: tr onClick), while
+      // the overlay's click handler only fires on the alias cell —
+      // so a row click outside the alias cell expands React without
+      // touching expanded[]. The expand row's own class
+      // (visible/collapse) is therefore the source of truth, OR'd
+      // with the overlay map (the map covers the pre-render window:
+      // our click fires before React's class flips). The indicator
+      // follows the same OR, so it never disagrees with React.
+      var tr0 = td.closest('tr');
+      var expandRow = (tr0 && tr0.nextElementSibling) ? tr0.nextElementSibling : null;
+      var reactTd = null;
+      var reactOpen = false;
+      if (expandRow) {
+        var rtds0 = expandRow.querySelectorAll('td');
+        if (rtds0.length === 1) {
+          reactTd = rtds0[0];
+          reactOpen = /(^|\s)visible(\s|$)/.test(expandRow.className || '');
+        }
+      }
+      var open = reactOpen || !!expanded[srv.name];
       // Drop lines injected by the pre-fold overlay version, if any.
       Array.prototype.slice.call(td.querySelectorAll('[data-ssr-kind]')).forEach(function (el) { el.remove(); });
       // Expand/collapse indicator at the head of the name cell.
@@ -714,7 +736,7 @@
         ind.style.cssText = 'cursor:pointer;margin-right:4px;';
         div.insertBefore(ind, div.firstChild);
       }
-      var wantInd = expanded[srv.name] ? '▾' : '▸';
+      var wantInd = open ? '▾' : '▸';
       if (ind.textContent !== wantInd) ind.textContent = wantInd;
       // Tag filter: hide rows outside the active pill's Tag. Unmapped
       // rows (name not found in stats) always stay visible.
@@ -773,25 +795,21 @@
       // never stack.
       var legacy = td.querySelector('[data-ssr-detail]');
       if (legacy) legacy.remove();
-      // React's own expand row: the row right after the main row,
-      // with a single colspan td. Any other shape (another node's
-      // main row, a leftover) is rejected, never attached into.
-      var reactTd = null;
-      if (tr && tr.nextElementSibling) {
-        // In a tbody the next sibling can only be another row; the
-        // single-td shape is React's expand row, a multi-td row is
-        // the next node's main row and is never attached into.
-        var rtds = tr.nextElementSibling.querySelectorAll('td');
-        if (rtds.length === 1) reactTd = rtds[0];
-      }
-      if (!expanded[srv.name]) {
+      // reactTd/reactOpen/open were computed at the top of this row's
+      // pass (React's expand row: next sibling, single colspan td;
+      // any other shape is rejected, never attached into). The gate
+      // is `open`, not the overlay map alone: a whole-row click
+      // outside the alias cell expands React without touching
+      // expanded[], and gating on the map alone would render
+      // nothing — exactly the "tabs never appear" shape.
+      if (!open) {
         if (reactTd) {
           var stale = reactTd.querySelector('[data-ssr-detail]');
           if (stale) stale.remove();
         }
         return;
       }
-      if (!reactTd) return; // React has not rendered its row yet; retry next inject.
+      if (!reactTd) return; // No single-td expand row; retry next inject.
       var st = detailStateFor(srv.name);
       var key = detailLines(srv).join('\n')
         + '|tab=' + st.tab + '|range=' + st.range
