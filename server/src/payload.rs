@@ -63,6 +63,39 @@ pub struct HostStat {
     #[serde(default)]
     pub last_network_out: u64,
 
+    // Fork: client-reported boot identifier (never serialized out: it is an
+    // internal accounting key, not public data).
+    #[serde(default, skip_serializing)]
+    pub boot_id: String,
+
+    // Fork: server-side traffic accounting (see traffic.rs). Set by the
+    // server on every report; all default to zero for old clients/themes.
+    #[serde(default)]
+    pub month_rx: u64,
+    #[serde(default)]
+    pub month_tx: u64,
+    #[serde(default)]
+    pub day_rx: u64,
+    #[serde(default)]
+    pub day_tx: u64,
+    #[serde(default)]
+    pub total_rx: u64,
+    #[serde(default)]
+    pub total_tx: u64,
+    /// This period's usage under the host's traffic_mode.
+    #[serde(default)]
+    pub month_used: u64,
+    /// Configured allowance in bytes, 0 = unlimited.
+    #[serde(default)]
+    pub traffic_limit: u64,
+    #[serde(default)]
+    pub traffic_mode: String,
+    /// month_used as a percentage of traffic_limit, 0 when unlimited.
+    #[serde(default)]
+    pub traffic_percent: u64,
+    #[serde(default)]
+    pub month_start: String,
+
     pub cpu: f64,
     pub memory_total: u64,
     pub memory_used: u64,

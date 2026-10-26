@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ServerStatus 后台</title>
+<style>
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:1080px;margin:0 auto;padding:16px;background:#f6f7f9;color:#222}
+h1{font-size:20px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+th,td{border:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top}
+input,select{padding:5px 7px;font-size:13px;margin:2px}
+button{padding:5px 12px;font-size:13px;cursor:pointer}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all;background:#f0f0f0;padding:8px}
+.card{background:#fff;border:1px solid #e3e3e3;padding:12px;margin:8px 0}
+label{display:inline-block;min-width:96px}
+.hint{color:#666;font-size:12px}
+.err{color:#c00}.ok{color:#080}
+#login{display:block}#app{display:none}
+</style>
+</head>
+<body>
+<h1>ServerStatus 后台</h1>
+<div id="login" class="card">
+  <label>管理员账号</label><input id="u" value="admin"> <label>密码</label><input id="p" type="password">
+  <button onclick="login()">登录</button> <span id="loginMsg" class="err"></span>
+  <p class="hint">账号密码来自 config.toml 的 admin 账号；登录 token 只存 sessionStorage，关掉页面即失效。</p>
+</div>
+<div id="app">
+  <button onclick="logout()">退出登录</button> <span id="msg"></span>
+
+  <h2>节点</h2>
+  <div id="hosts"></div>
+  <div class="card">
+    <h3>添加节点（提交后自动生成一键命令，复制到新机器上执行即可接入）</h3>
+    <label>节点名 *</label><input id="h_name" placeholder="如 cheap3"> <label>密码 *</label><input id="h_pass" placeholder="客户端密码">
+    <label>显示名</label><input id="h_alias" placeholder="默认同节点名"><br>
+    <label>分组</label><select id="h_gid"><option value="">（不分组，单节点）</option></select>
+    <label>地区</label><input id="h_location"> <label>类型</label><input id="h_type" placeholder="如 kvm"><br>
+    <label>流量限额 GiB</label><input id="h_limit" type="number" min="0" value="0" placeholder="0=不限量">
+    <label>计费模式</label><select id="h_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
+    <label>重置日</label><input id="h_ms" type="number" min="1" max="31" value="1"><br>
+    <label>开始日期</label><input id="h_start" type="date"> <label>年费</label><input id="h_fee" type="number" step="0.01" min="0" placeholder="如 15.99"> <label>带宽 Mbps</label><input id="h_bw" type="number" min="0" placeholder="如 1000"><br>
+    <button onclick="addHost()">添加并生成一键命令</button>
+    <div id="newInstall" class="mono" style="display:none"></div>
+  </div>
+
+  <h2>分组（动态注册模板：客户端用 -g 分组名 -p 分组密码接入，主机自动出现在节点表）</h2>
+  <div id="groups"></div>
+  <div class="card">
+    <h3>添加分组</h3>
+    <label>分组名 *</label><input id="g_gid" placeholder="如 hk"> <label>密码 *</label><input id="g_pass">
+    <label>地区</label><input id="g_location"> <label>类型</label><input id="g_type"><br>
+    <label>流量限额 GiB</label><input id="g_limit" type="number" min="0" value="0">
+    <label>计费模式</label><select id="g_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select><br>
+    <label>开始日期</label><input id="g_start" type="date"> <label>年费</label><input id="g_fee" type="number" step="0.01" min="0"> <label>带宽 Mbps</label><input id="g_bw" type="number" min="0">
+    <button onclick="addGroup()">添加分组</button>
+  </div>
+
+  <h2>流量设置与修正</h2>
+  <p class="hint">限额以 GiB 输入，接口以字节存储；修正会按当前计费模式把设定值拆进本月计数并盖当前周期戳，之后采集往上加。</p>
+  <div id="traffic"></div>
+
+  <h2>三网 ping 探针（后台统一管，客户端下次上报自动生效，不用逐台改命令行）</h2>
+  <div class="card">
+    <label><input id="ping_enabled" type="checkbox" checked> 启用三网 ping</label><br>
+    <label>联通</label><input id="ping_cu" size="34"> <label>电信</label><input id="ping_ct" size="34"> <label>移动</label><input id="ping_cm" size="34"><br>
+    <button onclick="savePing()">保存 ping 设置</button>
+  </div>
+
+  <h2>掉线推送（PushPlus）</h2>
+  <div class="card">
+    <label><input id="pp_enabled" type="checkbox"> 启用 PushPlus</label><br>
+    <label>PushPlus token</label><input id="pp_token" type="password" size="40" placeholder="留空表示不改">
+    <span id="pp_token_set" class="hint"></span><br>
+    <label>标题</label><input id="pp_title" placeholder="ServerStatus"> <label>渠道</label><input id="pp_channel" placeholder="wechat"><br>
+    <label>掉线模板</label><input id="pp_offline" size="60" placeholder="留空用默认文案：别名 (节点名) 掉线"><br>
+    <label>恢复模板</label><input id="pp_online" size="60"><br>
+    <button onclick="savePushPlus()">保存 PushPlus 设置</button>
+    <p class="hint">模板为空时：掉线/恢复用默认文案推送；自定义/流量告警模板为空则不发。token 只存服务端，不会在本页回显。</p>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let TOKEN = sessionStorage.getItem('ssr_admin_token') || '';
+const GiB = 1024*1024*1024;
+async function api(path, method='GET', body) {
+  const r = await fetch(path, {method, headers: {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}, body: body?JSON.stringify(body):undefined});
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch(e) { j = {error:t}; }
+  if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+function showMsg(s, ok=true){ const m=$('msg'); m.textContent=s; m.className = ok?'ok':'err'; }
+async function login() {
+  try {
+    const j = await api('/api/admin/authorize','POST',{username:$('u').value, password:$('p').value});
+    TOKEN = j.token; sessionStorage.setItem('ssr_admin_token', TOKEN);
+    $('login').style.display='none'; $('app').style.display='block'; loadAll();
+  } catch(e){ $('loginMsg').textContent = '登录失败：'+e.message; }
+}
+function logout(){ TOKEN=''; sessionStorage.removeItem('ssr_admin_token'); $('app').style.display='none'; $('login').style.display='block'; }
+async function loadAll(){ try { await Promise.all([loadHosts(), loadGroups(), loadTraffic(), loadPing(), loadPushPlus()]); } catch(e){ showMsg('加载失败：'+e.message, false); } }
+async function loadHosts() {
+  const hosts = await api('/api/admin/hosts');
+  let html = '<table><tr><th>节点</th><th>显示名</th><th>分组</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽 Mbps</th><th>操作</th></tr>';
+  for (const h of hosts) {
+    html += '<tr><td>'+h.name+'</td><td>'+h.alias+'</td><td>'+(h.gid||'-')+'</td><td>'+h.location+' / '+h.type+'</td>'
+      + '<td><input id="lim_'+h.name+'" type="number" min="0" value="'+Math.round(h.traffic_limit/GiB)+'"></td>'
+      + '<td><select id="mode_'+h.name+'">'+['sum','up','down','max'].map(m=>'<option value="'+m+'"'+(m===h.traffic_mode?' selected':'')+'>'+m+'</option>').join('')+'</select></td>'
+      + '<td><input id="ms_'+h.name+'" type="number" min="1" max="31" value="'+h.monthstart+'" style="width:56px"></td>'
+      + '<td><input id="st_'+h.name+'" type="date" value="'+(h.plan_start_date||'')+'"></td>'
+      + '<td><input id="fee_'+h.name+'" type="number" step="0.01" min="0" value="'+(h.annual_fee||0)+'" style="width:80px"></td>'
+      + '<td><input id="bw_'+h.name+'" type="number" min="0" value="'+(h.bandwidth_mbps||0)+'" style="width:70px"></td>'
+      + '<td><button onclick="saveHostTraffic(\''+h.name+'\')">保存流量</button> <button onclick="saveHostPlan(\''+h.name+'\')">保存套餐</button> <button onclick="showInstall(\''+h.name+'\')">一键命令</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
+  }
+  html += '</table><div id="installBox" class="mono" style="display:none"></div>';
+  $('hosts').innerHTML = html;
+}
+async function loadGroups() {
+  const groups = await api('/api/admin/groups');
+  const sel = $('h_gid');
+  sel.innerHTML = '<option value="">（不分组，单节点）</option>' + groups.map(g=>'<option value="'+g.gid+'">'+g.gid+'（'+g.member_count+' 台，来源 '+g.source+'）</option>').join('');
+  let html = '<table><tr><th>分组</th><th>地区/类型</th><th>成员</th><th>限额 GiB</th><th>来源</th><th>操作</th></tr>';
+  for (const g of groups) {
+    html += '<tr><td>'+g.gid+'</td><td>'+g.location+' / '+g.type+'</td><td>'+g.member_count+'</td><td>'+Math.round(g.traffic_limit/GiB)+'</td><td>'+g.source+'</td><td><button onclick="delGroup(\''+g.gid+'\')">删除</button></td></tr>';
+  }
+  $('groups').innerHTML = html + '<p class="hint">删除分组不踢出已注册成员；要彻底清掉需再逐个删除节点，或停掉客户端。</p>';
+}
+async function loadTraffic() {
+  const t = await api('/api/admin/traffic');
+  let html = '<table><tr><th>节点</th><th>今日</th><th>本月</th><th>总计</th><th>已用（按计费模式）</th><th>限额</th><th>修正本月为 GiB</th></tr>';
+  for (const row of t) {
+    const gb = v => (v/GiB).toFixed(2);
+    html += '<tr><td>'+row.name+'</td><td>'+gb(row.day_rx+row.day_tx)+'</td><td>'+gb(row.month_rx+row.month_tx)+'</td><td>'+gb(row.total_rx+row.total_tx)+'</td><td>'+gb(row.month_used)+'</td><td>'+(row.traffic_limit?gb(row.traffic_limit):'不限量')+'</td><td><input id="corr_'+row.name+'" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correct(\''+row.name+'\')">修正</button></td></tr>';
+  }
+  $('traffic').innerHTML = html;
+}
+async function loadPing() {
+  const p = await api('/api/admin/ping');
+  $('ping_enabled').checked = !!p.enabled; $('ping_cu').value = p.cu_addr||''; $('ping_ct').value = p.ct_addr||''; $('ping_cm').value = p.cm_addr||'';
+}
+async function loadPushPlus() {
+  const p = await api('/api/admin/notify/pushplus');
+  $('pp_enabled').checked = !!p.enabled; $('pp_title').value = p.title||''; $('pp_channel').value = p.channel||'';
+  $('pp_offline').value = p.offline_tpl||''; $('pp_online').value = p.online_tpl||'';
+  $('pp_token_set').textContent = p.token_set ? '（已设置 token，留空不改）' : '（未设置 token）';
+}
+async function addHost() {
+  try {
+    const body = {name:$('h_name').value.trim(), password:$('h_pass').value, alias:$('h_alias').value.trim(), location:$('h_location').value.trim(), type:$('h_type').value.trim(), gid:$('h_gid').value, monthstart:parseInt($('h_ms').value)||1, traffic_limit:Math.round(parseFloat($('h_limit').value||0)*GiB), traffic_mode:$('h_mode').value, plan_start_date:$('h_start').value, annual_fee:parseFloat($('h_fee').value||0), bandwidth_mbps:parseInt($('h_bw').value||0)};
+    const j = await api('/api/admin/hosts','POST',body);
+    const box = $('newInstall'); box.style.display='block';
+    box.innerHTML = '一键命令（在新机器上以 root 执行）：<br><br>'+j.install.install_command+'<br><br>已包含节点名与密码；执行后客户端自动下载、安装并上报。';
+    showMsg('节点已添加'); loadHosts(); loadTraffic();
+  } catch(e){ showMsg('添加失败：'+e.message, false); }
+}
+async function showInstall(name) {
+  try {
+    const j = await api('/api/admin/hosts/'+encodeURIComponent(name)+'/install');
+    const box = $('installBox'); box.style.display='block';
+    box.innerHTML = name+' 的一键命令：<br><br>'+j.install_command+'<br><br>直接运行的客户端命令：<br>'+j.client_command;
+    box.scrollIntoView();
+  } catch(e){ showMsg('获取失败：'+e.message, false); }
+}
+async function saveHostTraffic(name) {
+  try {
+    await api('/api/admin/hosts/'+encodeURIComponent(name)+'/traffic','PUT',{traffic_limit:Math.round(parseFloat($('lim_'+name).value||0)*GiB), traffic_mode:$('mode_'+name).value, monthstart:parseInt($('ms_'+name).value)||1});
+    showMsg(name+' 流量设置已保存');
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function saveHostPlan(name) {
+  try {
+    await api('/api/admin/hosts/'+encodeURIComponent(name),'PUT',{plan_start_date:$('st_'+name).value, annual_fee:parseFloat($('fee_'+name).value||0), bandwidth_mbps:parseInt($('bw_'+name).value||0)});
+    showMsg(name+' 套餐已保存');
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function delHost(name) {
+  if (!confirm('删除节点 '+name+'？删除后该节点立即从面板下线；其客户端会鉴权失败，需另行停掉。')) return;
+  try { const j = await api('/api/admin/hosts/'+encodeURIComponent(name),'DELETE'); showMsg('已删除 '+name+(j.note?'（'+j.note+'）':'')); loadHosts(); loadTraffic(); } catch(e){ showMsg('删除失败：'+e.message, false); }
+}
+async function addGroup() {
+  try {
+    await api('/api/admin/groups','POST',{gid:$('g_gid').value.trim(), password:$('g_pass').value, location:$('g_location').value.trim(), type:$('g_type').value.trim(), traffic_limit:Math.round(parseFloat($('g_limit').value||0)*GiB), traffic_mode:$('g_mode').value, plan_start_date:$('g_start').value, annual_fee:parseFloat($('g_fee').value||0), bandwidth_mbps:parseInt($('g_bw').value||0)});
+    showMsg('分组已添加；客户端用 -g '+$('g_gid').value+' -p 分组密码接入'); loadGroups();
+  } catch(e){ showMsg('添加失败：'+e.message, false); }
+}
+async function delGroup(gid) {
+  if (!confirm('删除分组 '+gid+'？已注册成员不会自动下线。')) return;
+  try { await api('/api/admin/groups/'+encodeURIComponent(gid),'DELETE'); showMsg('分组已删除'); loadGroups(); loadHosts(); } catch(e){ showMsg('删除失败：'+e.message, false); }
+}
+async function correct(name) {
+  const v = parseFloat($('corr_'+name).value);
+  if (!(v >= 0)) { showMsg('修正值须为 >= 0 的数字', false); return; }
+  try { await api('/api/admin/hosts/'+encodeURIComponent(name)+'/traffic/correct','PUT',{month_used:Math.round(v*GiB)}); showMsg(name+' 已修正'); loadTraffic(); } catch(e){ showMsg('修正失败：'+e.message, false); }
+}
+async function savePing() {
+  try { await api('/api/admin/ping','PUT',{enabled:$('ping_enabled').checked, cu_addr:$('ping_cu').value.trim(), ct_addr:$('ping_ct').value.trim(), cm_addr:$('ping_cm').value.trim()}); showMsg('ping 设置已保存，客户端下次上报生效'); } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function savePushPlus() {
+  try { await api('/api/admin/notify/pushplus','PUT',{enabled:$('pp_enabled').checked, token:$('pp_token').value, title:$('pp_title').value.trim(), channel:$('pp_channel').value.trim(), offline_tpl:$('pp_offline').value, online_tpl:$('pp_online').value}); showMsg('PushPlus 设置已保存'); $('pp_token').value=''; loadPushPlus(); } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+if (TOKEN) { $('login').style.display='none'; $('app').style.display='block'; loadAll(); }
+</script>
+</body>
+</html>

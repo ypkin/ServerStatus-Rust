@@ -85,15 +85,12 @@ pub async fn init_client(uri: Uri, req_header: HeaderMap, Query(params): Query<H
         return (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED.to_string()).into_response();
     }
 
-    // auth
-    let mut auth_ok = false;
-    if let Some(cfg) = G_CONFIG.get() {
-        if gid.is_empty() {
-            auth_ok = cfg.auth(uid, pass);
-        } else {
-            auth_ok = cfg.group_auth(gid, pass);
-        }
-    }
+    // auth (fork: admin-managed hosts/groups included)
+    let auth_ok = if gid.is_empty() {
+        crate::admin::check_host_auth(uid, pass)
+    } else {
+        crate::admin::check_group_auth(gid, pass)
+    };
     if !auth_ok {
         return (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED.to_string()).into_response();
     }
@@ -413,7 +410,7 @@ pub async fn get_detail(
 }
 
 // report
-pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -> impl IntoResponse {
+pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -> Response {
     let mut json_data: Option<serde_json::Value> = None;
 
     let content_type_header = req_header.get(header::CONTENT_TYPE);
@@ -440,20 +437,32 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
                 }
             }
         } else {
-            return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
         }
     }
 
     if json_data.is_none() {
         error!("{}", "Invalid json data!");
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
 
     if let Some(mgr) = G_STATS_MGR.get() {
         if mgr.report(json_data.unwrap()).is_err() {
-            return StatusCode::BAD_REQUEST;
+            return StatusCode::BAD_REQUEST.into_response();
         }
     }
 
-    StatusCode::OK
+    // Fork: push server-managed three-carrier probe settings to the client
+    // on every report (see admin.rs). Old clients ignore the body.
+    let ping = crate::admin::effective_ping();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ping_enabled": ping.enabled,
+            "ping_cu": ping.cu_addr,
+            "ping_ct": ping.ct_addr,
+            "ping_cm": ping.cm_addr,
+        })),
+    )
+        .into_response()
 }

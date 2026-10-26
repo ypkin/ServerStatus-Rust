@@ -28,6 +28,9 @@ hosts = [
   {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=freebsd;ndd=2022/11/25;spec=2C/4G/60G;"},
   {name = "h2", password = "p2", alias = "n2", location = "🏢", type = "kvm", disabled = false},
   {name = "h3", password = "p3", alias = "n3", location = "🏡", type = "kvm", monthstart = 1},
+  # fork: traffic quota + plan fields (also editable in the /admin panel;
+  # traffic_limit is bytes, 0 = unlimited; annual_fee in panel currency)
+  {name = "h5", password = "p5", alias = "n5", location = "🇭🇰", type = "kvm", monthstart = 1, traffic_limit = 1099511627776, traffic_mode = "sum", plan_start_date = "2026-01-15", annual_fee = 15.99, bandwidth_mbps = 1000},
   {name = "h4", password = "p4", alias = "n4", location = "cn", type = "kvm", notify = true, labels = "ndd=2022/11/25;spec=2C/4G/60G;"},
 
   # 最小化配置
@@ -43,7 +46,7 @@ hosts = [
 hosts_group = [
   # 可以按国家地区或用途来做分组
   {gid = "g1", password = "pp", location = "🏠", type = "kvm", labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"},
-  {gid = "g2", password = "pp", location = "🏢", type = "kvm", notify = true},
+  {gid = "g2", password = "pp", location = "🏢", type = "kvm", notify = true, traffic_limit = 1099511627776, traffic_mode = "sum", plan_start_date = "2026-01-15", annual_fee = 15.99, bandwidth_mbps = 1000},
   # 例如不发送通知可以单独做一组
   {gid = "silent", password = "pp", location = "🏡", type = "kvm", notify = false},
 ]
@@ -326,3 +329,26 @@ enabled = false
   """
 
 ###################### webhook end ##########################
+
+###################### fork: three-carrier ping + pushplus ######################
+# fork: server-managed probe addresses. The panel (/admin) can override
+# these at runtime; clients fetch the effective values on every report,
+# so no per-host CLI change is needed. Empty address = keep client value.
+[ping]
+enabled = true
+cu_addr = "cu.tz.cloudcpp.com:80"
+ct_addr = "ct.tz.cloudcpp.com:80"
+cm_addr = "cm.tz.cloudcpp.com:80"
+
+# fork: PushPlus offline alerts (https://www.pushplus.plus). The panel
+# (/admin) can enable it and set the token at runtime; the token is never
+# returned by any API. channel is usually "wechat".
+[pushplus]
+enabled = false
+token = ""
+title = "ServerStatus"
+channel = "wechat"
+online_tpl = ""
+offline_tpl = ""
+custom_tpl = ""
+traffic_tpl = ""

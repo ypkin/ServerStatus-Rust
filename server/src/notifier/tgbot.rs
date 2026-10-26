@@ -21,6 +21,8 @@ pub struct Config {
     pub online_tpl: String,
     pub offline_tpl: String,
     pub custom_tpl: String,
+    #[serde(default)]
+    pub traffic_tpl: String,
 }
 
 pub struct TGBot {
@@ -40,6 +42,7 @@ impl TGBot {
         add_template(KIND, get_tag(&Event::NodeUp), o.config.online_tpl.clone());
         add_template(KIND, get_tag(&Event::NodeDown), o.config.offline_tpl.clone());
         add_template(KIND, get_tag(&Event::Custom), o.config.custom_tpl.clone());
+        add_template(KIND, get_tag(&Event::Traffic), o.config.traffic_tpl.clone());
 
         o
     }
@@ -90,6 +93,15 @@ impl crate::notifier::Notifier for TGBot {
             Event::NodeUp | Event::NodeDown => self.send_notify(content).unwrap(),
             Event::Custom => {
                 info!("render.custom.tpl => {content}");
+                if !content.is_empty() {
+                    self.send_notify(format!("{}\n{}", self.config.title, content))
+                        .unwrap_or_else(|err| {
+                            error!("send_msg err => {err:?}");
+                        });
+                }
+            }
+            Event::Traffic => {
+                info!("render.traffic.tpl => {content}");
                 if !content.is_empty() {
                     self.send_notify(format!("{}\n{}", self.config.title, content))
                         .unwrap_or_else(|err| {

@@ -26,6 +26,8 @@ const OS_LIST: [&str; 10] = [
 
 static STAT_SENDER: OnceCell<SyncSender<Cow<HostStat>>> = OnceCell::new();
 
+use crate::registry::{GROUPS_MAP, HOSTS_MAP, STAT_MAP};
+
 pub struct StatsMgr {
     resp_json: Arc<Mutex<String>>,
     stats_data: Arc<Mutex<StatsResp>>,
@@ -77,23 +79,50 @@ impl StatsMgr {
         cfg: &'static crate::config::Config,
         notifies: Arc<Mutex<Vec<Box<dyn Notifier + Send>>>>,
     ) -> Result<()> {
-        let hosts_map_base = Arc::new(Mutex::new(cfg.hosts_map.clone()));
-
-        // load last_network_in/out
-        if let Ok(mut hosts_map_guard) = hosts_map_base.lock() {
-            Self::load_last_network(&mut hosts_map_guard);
+        // Seed the live registries: config hosts (minus backend-deleted
+        // ones), overlaid by admin-managed hosts from admin.json.
+        // Fetch admin state first (ADMIN lock), then take the registries:
+        // lock order everywhere is registry -> ADMIN, never the reverse, so
+        // no admin handler may hold ADMIN while taking a registry lock.
+        let admin_hosts = crate::admin::admin_hosts();
+        let deleted_hosts = crate::admin::deleted_hosts();
+        let admin_groups = crate::admin::admin_groups();
+        let deleted_groups = crate::admin::deleted_groups();
+        {
+            let mut groups = GROUPS_MAP.lock().unwrap();
+            *groups = cfg.hosts_group_map.clone();
+            groups.retain(|gid, _| !deleted_groups.contains(gid));
+            for mut g in admin_groups {
+                g.traffic_mode = crate::config::normalize_traffic_mode(&g.traffic_mode);
+                groups.insert(g.gid.clone(), g);
+            }
+        }
+        {
+            let mut map = HOSTS_MAP.lock().unwrap();
+            *map = cfg.hosts_map.clone();
+            map.retain(|name, _| !deleted_hosts.contains(name));
+            for mut h in admin_hosts {
+                h.pos = map.values().map(|o| o.pos).max().unwrap_or(0) + 1;
+                h.weight = 10000_u64.saturating_sub(h.pos as u64);
+                if h.alias.is_empty() {
+                    h.alias = h.name.clone();
+                }
+                if h.monthstart < 1 || h.monthstart > 31 {
+                    h.monthstart = 1;
+                }
+                h.traffic_mode = crate::config::normalize_traffic_mode(&h.traffic_mode);
+                map.insert(h.name.clone(), h);
+            }
+            // load last_network_in/out
+            Self::load_last_network(&mut map);
         }
 
         let (stat_tx, stat_rx) = sync_channel(512);
         STAT_SENDER.set(stat_tx).unwrap();
         let (notifier_tx, notifier_rx) = sync_channel(512);
 
-        let stat_map: Arc<Mutex<HashMap<String, Arc<HostStat>>>> = Arc::new(Mutex::new(HashMap::new()));
-
         // stat_rx thread
         thread::spawn({
-            let hosts_map = hosts_map_base.clone();
-            let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
 
             move || loop {
@@ -108,10 +137,11 @@ impl StatsMgr {
                             stat_t.alias = stat_t.name.clone();
                         }
 
-                        if let Ok(mut hosts_map) = hosts_map.lock() {
+                        if let Ok(mut hosts_map) = HOSTS_MAP.lock() {
                             let host = hosts_map.get(&stat_t.name);
                             if host.is_none() || !host.unwrap().gid.eq(&stat_t.gid) {
-                                if let Some(group) = cfg.hosts_group_map.get(&stat_t.gid) {
+                                let group = GROUPS_MAP.lock().unwrap().get(&stat_t.gid).cloned();
+                                if let Some(group) = group.as_ref() {
                                     // 名称不变，换组了，更新组配置 & last in/out
                                     let mut inst = group.inst_host(&stat_t.name);
                                     if let Some(o) = host {
@@ -127,7 +157,7 @@ impl StatsMgr {
                     }
 
                     //
-                    if let Ok(mut hosts_map) = hosts_map.lock() {
+                    if let Ok(mut hosts_map) = HOSTS_MAP.lock() {
                         let host_info = hosts_map.get_mut(&stat_t.name);
                         if host_info.is_none() {
                             error!("invalid stat `{stat_t:?}");
@@ -157,17 +187,39 @@ impl StatsMgr {
                             stat_t.alias = info.alias.clone();
                         }
 
+                        // Previous report time, before it is overwritten below:
+                        // accumulate() uses it to recognise a reboot that
+                        // happened while this server was not watching.
+                        let prev_latest_ts = info.latest_ts;
                         info.latest_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         stat_t.latest_ts = info.latest_ts;
 
-                        // last_network_in/out
-                        if !stat_t.vnstat {
+                        // Fork traffic accounting (see traffic.rs). Effective
+                        // settings are base config merged with admin overrides.
+                        let (traffic_limit, traffic_mode, monthstart) =
+                            crate::admin::effective_host_settings(&stat_t.name, info);
+                        stat_t.traffic_limit = traffic_limit;
+                        stat_t.traffic_mode = traffic_mode.clone();
+                        let mut traffic_notify = false;
+                        if stat_t.vnstat {
+                            // vnstat already split the month client-side:
+                            // last_network_* = lifetime - this month.
+                            stat_t.month_rx = stat_t.network_in.saturating_sub(stat_t.last_network_in);
+                            stat_t.month_tx = stat_t.network_out.saturating_sub(stat_t.last_network_out);
+                            stat_t.total_rx = stat_t.network_in;
+                            stat_t.total_tx = stat_t.network_out;
+                            stat_t.month_start =
+                                crate::traffic::period_start(Local::now().date_naive(), monthstart).to_string();
+                            stat_t.day_rx = 0;
+                            stat_t.day_tx = 0;
+                        } else if stat_t.boot_id.is_empty() {
+                            // Legacy / python clients without boot_id: keep the
+                            // old baseline behaviour (month = lifetime -
+                            // baseline), folded through the configured mode.
                             let local_now = Local::now();
                             if info.last_network_in == 0
                                 || (stat_t.network_in != 0 && info.last_network_in > stat_t.network_in)
-                                || (local_now.day() == info.monthstart
-                                    && local_now.hour() == 0
-                                    && local_now.minute() < 5)
+                                || (local_now.day() == monthstart && local_now.hour() == 0 && local_now.minute() < 5)
                             {
                                 info.last_network_in = stat_t.network_in;
                                 info.last_network_out = stat_t.network_out;
@@ -175,7 +227,68 @@ impl StatsMgr {
                                 stat_t.last_network_in = info.last_network_in;
                                 stat_t.last_network_out = info.last_network_out;
                             }
+                            stat_t.month_rx = stat_t.network_in.saturating_sub(stat_t.last_network_in);
+                            stat_t.month_tx = stat_t.network_out.saturating_sub(stat_t.last_network_out);
+                            stat_t.total_rx = stat_t.network_in;
+                            stat_t.total_tx = stat_t.network_out;
+                            stat_t.month_start =
+                                crate::traffic::period_start(Local::now().date_naive(), monthstart).to_string();
+                            stat_t.day_rx = 0;
+                            stat_t.day_tx = 0;
+                        } else {
+                            // Server-side accumulate: only observed increases.
+                            let now = Local::now();
+                            let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                            let booted = if stat_t.uptime > 0 && (stat_t.uptime as i64) <= now_ts {
+                                Some(now_ts - stat_t.uptime as i64)
+                            } else {
+                                None
+                            };
+                            let mut traffic_map = crate::traffic::TRAFFIC.lock().unwrap();
+                            let st = traffic_map.entry(stat_t.name.clone()).or_default();
+                            st.accumulate(
+                                &stat_t.boot_id.clone(),
+                                stat_t.network_in,
+                                stat_t.network_out,
+                                monthstart,
+                                now,
+                                booted,
+                                prev_latest_ts as i64,
+                            );
+                            stat_t.month_rx = st.month_rx;
+                            stat_t.month_tx = st.month_tx;
+                            stat_t.day_rx = st.day_rx;
+                            stat_t.day_tx = st.day_tx;
+                            stat_t.total_rx = st.total_rx;
+                            stat_t.total_tx = st.total_tx;
+                            stat_t.month_start = st.month_start.clone();
+                            // Compatibility shim for old themes, which compute
+                            // the month as network_in - last_network_in.
+                            stat_t.last_network_in = stat_t.network_in.saturating_sub(st.month_rx);
+                            stat_t.last_network_out = stat_t.network_out.saturating_sub(st.month_tx);
+                            // Deduped allowance alert (monitor model).
+                            if traffic_limit > 0 {
+                                let used = crate::traffic::month_used(st.month_rx, st.month_tx, &traffic_mode);
+                                let step = crate::traffic::TrafficState::alert_step(
+                                    used,
+                                    traffic_limit,
+                                    cfg.traffic_alert_percent,
+                                );
+                                if step > 0 && (st.alerted_period != stat_t.month_start || st.alerted_step < step) {
+                                    st.alerted_step = step;
+                                    st.alerted_period = stat_t.month_start.clone();
+                                    traffic_notify = true;
+                                } else if step < st.alerted_step && st.alerted_period == stat_t.month_start {
+                                    st.alerted_step = step;
+                                }
+                            }
                         }
+                        stat_t.month_used = crate::traffic::month_used(stat_t.month_rx, stat_t.month_tx, &traffic_mode);
+                        stat_t.traffic_percent = if traffic_limit > 0 {
+                            (stat_t.month_used as u128 * 100 / traffic_limit as u128) as u64
+                        } else {
+                            0
+                        };
 
                         // uptime str
                         let day = stat_t.uptime / (3600 * 24);
@@ -191,7 +304,7 @@ impl StatsMgr {
                         }
 
                         info!("update stat `{stat_t:?}");
-                        if let Ok(mut host_stat_map) = stat_map.lock() {
+                        if let Ok(mut host_stat_map) = STAT_MAP.lock() {
                             let mut notify_up = false;
                             if let Some(pre_stat) = host_stat_map.get(&stat_t.name) {
                                 if stat_t.ip_info.is_none() {
@@ -207,6 +320,10 @@ impl StatsMgr {
                                 // node up notify
                                 notifier_tx.send((Event::NodeUp, Arc::clone(&arc_stat)));
                             }
+                            if traffic_notify {
+                                // traffic allowance step notify (deduped)
+                                let _ = notifier_tx.send((Event::Traffic, Arc::clone(&arc_stat)));
+                            }
                             host_stat_map.insert(arc_stat.name.clone(), arc_stat);
                             //trace!("{:?}", host_stat_map);
                         }
@@ -219,8 +336,6 @@ impl StatsMgr {
         thread::spawn({
             let resp_json = self.resp_json.clone();
             let stats_data = self.stats_data.clone();
-            let hosts_map = hosts_map_base.clone();
-            let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
             let mut latest_notify_ts = 0_u64;
             let mut latest_save_ts = 0_u64;
@@ -237,16 +352,16 @@ impl StatsMgr {
                 if latest_group_gc + cfg.group_gc < now {
                     latest_group_gc = now;
                     //
-                    if let Ok(mut hm) = hosts_map.lock() {
+                    if let Ok(mut hm) = HOSTS_MAP.lock() {
                         hm.retain(|_, o| o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now);
                     }
                     //
-                    if let Ok(mut sm) = stat_map.lock() {
+                    if let Ok(mut sm) = STAT_MAP.lock() {
                         sm.retain(|_, o| o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now);
                     }
                 }
 
-                if let Ok(mut host_stat_map) = stat_map.lock() {
+                if let Ok(mut host_stat_map) = STAT_MAP.lock() {
                     for (_, stat) in host_stat_map.iter_mut() {
                         if stat.disabled {
                             resp.servers.push(Arc::clone(stat));
@@ -314,9 +429,10 @@ impl StatsMgr {
                     a.alias.cmp(&b.alias)
                 });
 
-                // last_network_in/out save /60s
+                // last_network_in/out save /60s (plus traffic accounting)
                 if latest_save_ts + SAVE_INTERVAL < now {
                     latest_save_ts = now;
+                    crate::traffic::save_traffic();
                     if !resp.servers.is_empty() {
                         if let Ok(mut file) = File::create("stats.json") {
                             file.write_all(serde_json::to_string(&resp).unwrap().as_bytes());

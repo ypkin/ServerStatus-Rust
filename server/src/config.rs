@@ -24,6 +24,52 @@ fn default_workspace() -> String {
 fn default_tls_dir() -> String {
     "tls".to_string()
 }
+fn default_ping_cu() -> String {
+    "cu.tz.cloudcpp.com:80".to_string()
+}
+fn default_ping_ct() -> String {
+    "ct.tz.cloudcpp.com:80".to_string()
+}
+fn default_ping_cm() -> String {
+    "cm.tz.cloudcpp.com:80".to_string()
+}
+fn default_traffic_alert_percent() -> u32 {
+    80
+}
+
+/// Server-managed three-carrier probe settings (fork). These are the
+/// defaults; the admin panel may override them at runtime and the override
+/// is persisted in `admin.json` (see `admin.rs`). Clients fetch the
+/// effective values on every report instead of needing per-host CLI flags.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PingConfig {
+    #[serde(default = "default_as_true")]
+    pub enabled: bool,
+    #[serde(default = "default_ping_cu")]
+    pub cu_addr: String,
+    #[serde(default = "default_ping_ct")]
+    pub ct_addr: String,
+    #[serde(default = "default_ping_cm")]
+    pub cm_addr: String,
+}
+
+impl Default for PingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cu_addr: default_ping_cu(),
+            ct_addr: default_ping_ct(),
+            cm_addr: default_ping_cm(),
+        }
+    }
+}
+
+pub fn normalize_traffic_mode(mode: &str) -> String {
+    match mode {
+        "up" | "down" | "max" => mode.to_string(),
+        _ => "sum".to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Host {
@@ -43,6 +89,21 @@ pub struct Host {
     pub disabled: bool,
     #[serde(default = "Default::default")]
     pub labels: String,
+    /// Traffic allowance in bytes, 0 = unlimited (fork, monitor model).
+    #[serde(default = "Default::default")]
+    pub traffic_limit: u64,
+    /// Metering mode: sum | up | down | max (fork, default sum).
+    #[serde(default = "Default::default")]
+    pub traffic_mode: String,
+    /// Plan start date, YYYY-MM-DD, empty = unset (fork, backend-managed).
+    #[serde(default = "Default::default")]
+    pub plan_start_date: String,
+    /// Annual fee in the panel's currency (e.g. USD), 0 = unset (fork).
+    #[serde(default = "Default::default")]
+    pub annual_fee: f64,
+    /// Advertised bandwidth in Mbps, 0 = unset (fork).
+    #[serde(default = "Default::default")]
+    pub bandwidth_mbps: u32,
 
     #[serde(skip_deserializing)]
     pub last_network_in: u64,
@@ -70,6 +131,17 @@ pub struct HostGroup {
     pub r#type: String,
     #[serde(default = "default_as_true")]
     pub notify: bool,
+    #[serde(default = "Default::default")]
+    pub traffic_limit: u64,
+    #[serde(default = "Default::default")]
+    pub traffic_mode: String,
+    /// Plan defaults for members (fork, see Host).
+    #[serde(default = "Default::default")]
+    pub plan_start_date: String,
+    #[serde(default = "Default::default")]
+    pub annual_fee: f64,
+    #[serde(default = "Default::default")]
+    pub bandwidth_mbps: u32,
     // user data
     #[serde(skip_serializing, skip_deserializing)]
     pub pos: usize,
@@ -89,6 +161,11 @@ impl HostGroup {
             r#type: self.r#type.clone(),
             monthstart: 1,
             notify: self.notify,
+            traffic_limit: self.traffic_limit,
+            traffic_mode: self.traffic_mode.clone(),
+            plan_start_date: self.plan_start_date.clone(),
+            annual_fee: self.annual_fee,
+            bandwidth_mbps: self.bandwidth_mbps,
             pos: self.pos,
             weight: self.weight,
             labels: self.labels.clone(),
@@ -126,6 +203,16 @@ pub struct Config {
     pub log: notifier::log::Config,
     #[serde(default = "Default::default")]
     pub webhook: notifier::webhook::Config,
+    #[serde(default = "Default::default")]
+    pub pushplus: notifier::pushplus::Config,
+
+    /// Three-carrier probe defaults (fork, overridable from the admin panel).
+    #[serde(default = "Default::default")]
+    pub ping: PingConfig,
+    /// Traffic-alert step in percent, e.g. 80 alerts at 80% and at 100%
+    /// (fork). Clamped to 1..=100 at load.
+    #[serde(default = "default_traffic_alert_percent")]
+    pub traffic_alert_percent: u32,
 
     #[serde(default = "Default::default")]
     pub hosts: Vec<Host>,
@@ -188,8 +275,17 @@ pub fn from_str(content: &str) -> Option<Config> {
         if host.monthstart < 1 || host.monthstart > 31 {
             host.monthstart = 1;
         }
+        host.traffic_mode = normalize_traffic_mode(&host.traffic_mode);
         host.weight = 10000_u64 - idx as u64;
         o.hosts_map.insert(host.name.clone(), host.clone());
+    }
+
+    for group in o.hosts_group.iter_mut() {
+        group.traffic_mode = normalize_traffic_mode(&group.traffic_mode);
+    }
+
+    if o.traffic_alert_percent < 1 || o.traffic_alert_percent > 100 {
+        o.traffic_alert_percent = 80;
     }
 
     for (idx, group) in o.hosts_group.iter_mut().enumerate() {

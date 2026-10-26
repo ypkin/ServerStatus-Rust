@@ -292,53 +292,112 @@ pub struct PingData {
     pub probe_uri: String,
     pub lost_rate: u32,
     pub ping_time: u32,
+    /// Fork: server-managed on/off. False means "do not probe" (the
+    /// reported values then stay zero, like --disable-ping).
+    pub enabled: bool,
 }
 
 fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
     let mut package_list: LinkedList<i32> = LinkedList::new();
     let mut package_lost: u32 = 0;
-    let pt = &*data.lock().unwrap();
-    let addr = pt
-        .probe_uri
-        .to_socket_addrs()
-        .unwrap()
-        .next()
-        .expect("can't get addr info");
-    info!("{} => {:?}", pt.probe_uri, addr);
 
     let ping_data = data.clone();
-    thread::spawn(move || loop {
-        if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
-            package_lost -= 1;
-        }
-
-        let instant = Instant::now();
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(TIMEOUT_MS)) {
-            Ok(s) => {
-                let _ = s.shutdown(Shutdown::Both);
-                package_list.push_back(1);
+    thread::spawn(move || {
+        let mut cached_uri = String::new();
+        let mut cached_addr: Option<std::net::SocketAddr> = None;
+        loop {
+            let (uri, enabled) = {
+                let o = ping_data.lock().unwrap();
+                (o.probe_uri.clone(), o.enabled)
+            };
+            if !enabled || uri.is_empty() {
+                thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                continue;
             }
-            Err(e) => {
-                // error!("{:?}", e);
-                if e.kind() == ConnectionRefused {
+            // Re-resolve whenever the server pushed a new probe address.
+            if cached_uri != uri || cached_addr.is_none() {
+                match uri.to_socket_addrs().ok().and_then(|mut it| it.next()) {
+                    Some(addr) => {
+                        info!("{} => {:?}", uri, addr);
+                        cached_uri = uri.clone();
+                        cached_addr = Some(addr);
+                    }
+                    None => {
+                        // Unresolvable probe: count a lost sample, retry
+                        // next round instead of probing a stale address.
+                        if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
+                            package_lost -= 1;
+                        }
+                        package_lost += 1;
+                        package_list.push_back(0);
+                        if let Ok(mut o) = ping_data.lock() {
+                            o.ping_time = TIMEOUT_MS as u32;
+                            if package_list.len() > 30 {
+                                o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                        continue;
+                    }
+                }
+            }
+            let addr = cached_addr.unwrap();
+
+            if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
+                package_lost -= 1;
+            }
+
+            let instant = Instant::now();
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(TIMEOUT_MS)) {
+                Ok(s) => {
+                    let _ = s.shutdown(Shutdown::Both);
                     package_list.push_back(1);
-                } else {
-                    package_lost += 1;
-                    package_list.push_back(0);
+                }
+                Err(e) => {
+                    if e.kind() == ConnectionRefused {
+                        package_list.push_back(1);
+                    } else {
+                        package_lost += 1;
+                        package_list.push_back(0);
+                    }
+                }
+            }
+            let time_cost_ms = instant.elapsed().as_millis();
+
+            if let Ok(mut o) = ping_data.lock() {
+                o.ping_time = u32::try_from(time_cost_ms).unwrap_or(u32::MAX);
+                if package_list.len() > 30 {
+                    o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
+                }
+            }
+
+            thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+        }
+    });
+}
+
+/// Fork: apply server-pushed three-carrier probe settings (see the
+/// server's report response). All-empty addresses mean "server does not
+/// manage ping" (e.g. an upstream server): keep the CLI settings.
+/// A disabled server setting stops probing but keeps the addresses, so a
+/// later re-enable resumes without another client change.
+pub fn apply_ping_config(enabled: bool, cu: &str, ct: &str, cm: &str) {
+    if cu.is_empty() && ct.is_empty() && cm.is_empty() {
+        return;
+    }
+    let apply = |cell: &OnceCell<Arc<Mutex<PingData>>>, addr: &str| {
+        if let Some(data) = cell.get() {
+            if let Ok(mut o) = data.lock() {
+                o.enabled = enabled;
+                if enabled && !addr.is_empty() {
+                    o.probe_uri = addr.to_string();
                 }
             }
         }
-        let time_cost_ms = instant.elapsed().as_millis();
-
-        if let Ok(mut o) = ping_data.lock() {
-            o.ping_time = u32::try_from(time_cost_ms).unwrap_or(u32::MAX);
-            if package_list.len() > 30 {
-                o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
-            }
-        }
-
-        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
-    });
+    };
+    apply(&G_PING_10010, cu);
+    apply(&G_PING_189, ct);
+    apply(&G_PING_10086, cm);
 }
 
 pub static G_PING_10010: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
@@ -346,11 +405,13 @@ pub static G_PING_189: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 pub static G_PING_10086: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 
 pub fn start_all_ping_collect_t(args: &Args) {
+    let ping_enabled = !args.disable_ping;
     G_PING_10010
         .set(Arc::new(Mutex::new(PingData {
             probe_uri: args.cu_addr.clone(),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
     G_PING_189
@@ -358,6 +419,7 @@ pub fn start_all_ping_collect_t(args: &Args) {
             probe_uri: args.ct_addr.clone(),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
     G_PING_10086
@@ -365,6 +427,7 @@ pub fn start_all_ping_collect_t(args: &Args) {
             probe_uri: args.cm_addr.clone(),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
 

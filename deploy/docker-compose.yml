@@ -1,0 +1,19 @@
+# Deploy on haruka: /home/web/ssr/docker-compose.yml
+# Data (config.toml, stats.json, traffic.json, admin.json) lives in ./data,
+# which is the container working directory: the server reads/writes all
+# four files relative to its cwd, so nothing is lost on recreate.
+# Ports are loopback-only: the public entry is the nginx vhost for
+# ssr.passall.us -> 127.0.0.1:8080; agents connect via https://.../report,
+# so the gRPC port never needs to be public.
+services:
+  ssr:
+    build: .
+    container_name: ssr-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9394:9394"
+    volumes:
+      - ./data:/data
+    working_dir: /data
+    command: ["/usr/local/bin/stat_server", "-c", "/data/config.toml"]

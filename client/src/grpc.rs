@@ -73,7 +73,14 @@ pub async fn report(args: &Args, stat_base: &mut StatRequest) -> anyhow::Result<
             let request = tonic::Request::new(stat_rt);
             match client.report(request).await {
                 Ok(resp) => {
-                    info!("grpc report resp => {resp:?}");
+                    let inner = resp.into_inner();
+                    crate::status::apply_ping_config(
+                        inner.ping_enabled,
+                        &inner.ping_cu,
+                        &inner.ping_ct,
+                        &inner.ping_cm,
+                    );
+                    info!("grpc report resp => {inner:?}");
                 }
                 Err(status) => {
                     error!("grpc report status => {status:?}");

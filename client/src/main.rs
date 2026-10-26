@@ -18,6 +18,7 @@ use std::thread::sleep;
 use stat_common::server_status::{IpInfo, StatRequest, SysInfo};
 type GenericError = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, GenericError>;
+mod boot_id;
 mod geoip;
 mod grpc;
 mod status;
@@ -309,7 +310,18 @@ fn http_report(args: &Args, stat_base: &mut StatRequest) -> Result<()> {
                 .await
             {
                 Ok(resp) => {
-                    info!("report resp => {resp:?}");
+                    if let Ok(text) = resp.text().await {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            crate::status::apply_ping_config(
+                                v.get("ping_enabled").and_then(|x| x.as_bool()).unwrap_or(false),
+                                &get("ping_cu"),
+                                &get("ping_ct"),
+                                &get("ping_cm"),
+                            );
+                        }
+                        info!("report resp => {text}");
+                    }
                 }
                 Err(err) => {
                     error!("report error => {err:?}");
@@ -436,6 +448,8 @@ async fn main() -> Result<()> {
     if !args.location.is_empty() {
         stat_base.location = args.location.clone();
     }
+    // fork: stable boot id for server-side traffic accounting
+    stat_base.boot_id = boot_id::boot_id();
     // dbg!(&stat_base);
 
     if args.addr.starts_with("http") {

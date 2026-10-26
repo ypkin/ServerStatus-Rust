@@ -7,6 +7,7 @@ use tokio::runtime::Handle;
 use crate::payload::HostStat;
 
 pub mod email;
+pub mod pushplus;
 pub mod log;
 pub mod tgbot;
 pub mod webhook;
@@ -19,6 +20,10 @@ pub enum Event {
     NodeUp,
     NodeDown,
     Custom,
+    /// Fork: a host crossed a traffic-allowance step (configured percent
+    /// or 100%). Deduped per host per billing period by the accounting
+    /// layer, unlike Custom which re-fires on every notify interval.
+    Traffic,
 }
 
 fn get_tag(e: &Event) -> &'static str {
@@ -26,6 +31,7 @@ fn get_tag(e: &Event) -> &'static str {
         Event::NodeUp => "NodeUp",
         Event::NodeDown => "NodeDown",
         Event::Custom => "Custom",
+        Event::Traffic => "Traffic",
     }
 }
 

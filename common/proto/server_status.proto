@@ -112,11 +112,21 @@ message StatRequest {
   // false: KiB (1024), true: KB (1000)
   bool si = 45;
   repeated DiskInfo disks = 46;
+  // Fork extension: stable boot identifier, e.g. "<boot_epoch>/<iface_digest>".
+  // Empty means "unknown" (old / python clients): the server then falls back
+  // to its legacy baseline accounting instead of accumulate().
+  string boot_id = 47;
 }
 
 message Response {
   int32 code = 1;
   string message = 2;
+  // Fork extension: server-managed three-carrier probe settings, pushed to
+  // the client on every report. Empty addresses mean "keep client args".
+  bool ping_enabled = 3;
+  string ping_cu = 4;
+  string ping_ct = 5;
+  string ping_cm = 6;
 }
 
 service ServerStatus { rpc Report(StatRequest) returns (Response); }
