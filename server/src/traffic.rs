@@ -87,6 +87,9 @@ pub fn month_used(month_rx: u64, month_tx: u64, traffic_mode: &str) -> u64 {
 /// upload = tx, "down" is download = rx. (An earlier version had up/down
 /// backwards — up put everything into rx, so the billed figure collapsed
 /// to ~0 and corrections looked like they "didn't take effect".)
+/// Superseded by `align_used_to` for corrections; kept (with its test)
+/// as the documented split rule, so it is allowed dead in normal builds.
+#[allow(dead_code)]
 pub fn split_month_used(v: u64, traffic_mode: &str) -> (u64, u64) {
     match traffic_mode {
         "up" => (0, v),
