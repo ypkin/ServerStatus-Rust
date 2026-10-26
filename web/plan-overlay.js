@@ -572,7 +572,7 @@
     var svgNS = 'http://www.w3.org/2000/svg';
     var svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-    svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px';
+    svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px;touch-action:pan-y';
     [0, 0.5, 1].forEach(function (f) {
       var y = PT + (1 - f) * (H - PT - PB);
       var ln = document.createElementNS(svgNS, 'line');
@@ -645,6 +645,10 @@
     vline.setAttribute('pointer-events', 'none');
     vline.style.display = 'none';
     svg.appendChild(vline);
+    // Drag grab strip (2026-10-27, v18): declared here so showTip
+    // can reference it; created after the hover rect below so it
+    // sits on top of it. showTip keeps it centred on the guide line.
+    var grab = null;
     // Floating tooltip (batch 6): the old static line under the chart
     // was easy to miss, and a handler on the overlay rect alone is
     // fragile if anything sits above it — so the tip now follows the
@@ -709,13 +713,21 @@
       }
       // Guide line at the column the tip shows (snapped column on
       // gaps), never the raw mouse x; hidden when the tip shows no
-      // column at all (the defensive all-empty case).
+      // column at all (the defensive all-empty case). The drag grab
+      // strip rides centred on the line (~20 units wide, transparent)
+      // so a finger can actually catch the 1px line.
       if (showTs !== null && !(allDash && snapTs === null)) {
         var vx = X(showTs);
         vline.setAttribute('x1', vx); vline.setAttribute('x2', vx);
         vline.style.display = 'block';
+        if (grab) {
+          grab.setAttribute('x', Math.max(PL, Math.min(vx - 10, W - PR - 20)));
+          grab.setAttribute('width', 20);
+          grab.style.display = 'block';
+        }
       } else {
         vline.style.display = 'none';
+        if (grab) grab.style.display = 'none';
       }
       // Vertical layout (2026-10-27): time on its own line, one
       // probe road per line (only configured roads — drawn is built
@@ -748,14 +760,77 @@
       tip.style.left = Math.max(8, Math.min(e.clientX + 12, window.innerWidth - tw - 8)) + 'px';
       tip.style.top = Math.max(8, Math.min(e.clientY + 12, window.innerHeight - th - 8)) + 'px';
     };
-    var hideTip = function () { tip.style.display = 'none'; vline.style.display = 'none'; };
+    var hideTip = function () { tip.style.display = 'none'; vline.style.display = 'none'; if (grab) grab.style.display = 'none'; };
     var hover = document.createElementNS(svgNS, 'rect');
     hover.setAttribute('x', PL); hover.setAttribute('y', 0);
     hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
     hover.setAttribute('fill', 'transparent');
+    hover.setAttribute('style', 'touch-action:pan-y');
     svg.appendChild(hover);
-    svg.addEventListener('mousemove', showTip);
-    svg.addEventListener('mouseleave', hideTip);
+    // Grab strip on top of the hover rect: transparent but
+    // hit-testable, full plot height, centred on the guide line by
+    // showTip. Pointerdown anywhere on the chart starts a scrub drag
+    // (see listeners below); the strip exists so the line itself is
+    // catchable by a finger, not just the plot in general.
+    grab = document.createElementNS(svgNS, 'rect');
+    grab.setAttribute('data-ssr-vgrab', '1');
+    grab.setAttribute('y', 0); grab.setAttribute('height', H);
+    grab.setAttribute('fill', 'transparent');
+    grab.setAttribute('pointer-events', 'all');
+    grab.setAttribute('style', 'touch-action:pan-y');
+    grab.style.display = 'none';
+    svg.appendChild(grab);
+    // Draggable guide (2026-10-27, v18): pointer events unify mouse
+    // and touch. Press-and-drag anywhere on the chart scrubs the
+    // guide; the tip follows with exactly the hover lookup + gap
+    // snap, so dragged values agree with hovered values. On release
+    // the guide + tip STAY at the last column (pinned) for reading,
+    // until the next hover move on the chart (position changed) or a
+    // re-render (new chart elements, fresh state) clears them.
+    // Pointer capture keeps the drag tracking past the chart edge;
+    // touch-action pan-y on the rects lets horizontal finger drags
+    // reach us while vertical page scroll still works. Desktop
+    // hover is unchanged: plain mousemove still shows/follows.
+    var drag = { active: false, pinned: false, id: null, x: 0, y: 0 };
+    var onHoverMove = function (e) {
+      if (drag.active) return; // pointermove drives the drag
+      if (drag.pinned) {
+        // Same-point compatibility mouse event after a touch release
+        // (or a 1px jitter): not a new hover, keep the pin.
+        if (Math.abs(e.clientX - drag.x) < 3 && Math.abs(e.clientY - drag.y) < 3) return;
+        drag.pinned = false;
+      }
+      showTip(e);
+    };
+    var onHoverLeave = function () {
+      if (drag.active || drag.pinned) return;
+      hideTip();
+    };
+    var onDragStart = function (e) {
+      drag.active = true; drag.pinned = false;
+      drag.id = (e.pointerId !== undefined ? e.pointerId : null);
+      if (typeof svg.setPointerCapture === 'function') {
+        try { svg.setPointerCapture(e.pointerId); } catch (err) {}
+      }
+      showTip(e);
+    };
+    var onDragMove = function (e) {
+      if (!drag.active) return;
+      if (drag.id !== null && e.pointerId !== undefined && e.pointerId !== drag.id) return;
+      showTip(e);
+    };
+    var onDragEnd = function (e) {
+      if (!drag.active) return;
+      if (drag.id !== null && e.pointerId !== undefined && e.pointerId !== drag.id) return;
+      drag.active = false; drag.pinned = true; drag.x = e.clientX; drag.y = e.clientY;
+      // Guide + tip deliberately left where the drag ended.
+    };
+    svg.addEventListener('mousemove', onHoverMove);
+    svg.addEventListener('mouseleave', onHoverLeave);
+    svg.addEventListener('pointerdown', onDragStart);
+    svg.addEventListener('pointermove', onDragMove);
+    svg.addEventListener('pointerup', onDragEnd);
+    svg.addEventListener('pointercancel', onDragEnd);
     var legend = document.createElement('div');
     legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#374151;margin-top:4px';
     drawn.forEach(function (s, idx) {
