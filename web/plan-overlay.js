@@ -103,6 +103,18 @@
     return (cur || '$') + (Math.round(fee * 100) / 100);
   }
 
+  // Bandwidth display, same rule as the admin table (fmtBw there):
+  // storage stays Mbps; <1000 -> Mbps, >=1000 -> Gbps, >=1000000 -> Tbps.
+  function fmtBw(mbps) {
+    mbps = Number(mbps) || 0;
+    if (mbps >= 1000000) return trimNum(mbps / 1000000) + 'Tbps';
+    if (mbps >= 1000) return trimNum(mbps / 1000) + 'Gbps';
+    return mbps + 'Mbps';
+  }
+  function trimNum(v) {
+    return String(Math.round(v * 1000) / 1000);
+  }
+
   function fmtDate(ts) {
     if (!ts) return '—';
     try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return '—'; }
@@ -117,7 +129,7 @@
     var parts = [];
     if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
     if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee, s.currency));
-    if (s.bandwidth_mbps > 0) parts.push('带宽 ' + s.bandwidth_mbps + 'Mbps');
+    if (s.bandwidth_mbps > 0) parts.push('带宽 ' + fmtBw(s.bandwidth_mbps));
     if (s.traffic_limit > 0) parts.push('限额 ' + fmtGiB(s.traffic_limit));
     else if (parts.length > 0) parts.push('限额不限量');
     return parts.length ? '套餐：' + parts.join(' · ') : '套餐：—';

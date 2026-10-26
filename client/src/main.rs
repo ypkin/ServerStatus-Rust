@@ -217,6 +217,22 @@ fn sample_all(args: &Args, stat_base: &StatRequest) -> StatRequest {
         }
     }
 
+    // Fork: real NIC addresses for the admin IP column (status::nic_addrs).
+    // sysinfo-gated: the deployed client builds with sysinfo, and the
+    // proto fields default to empty for other builds, where the admin
+    // falls back to the geoip query address.
+    #[cfg(feature = "sysinfo")]
+    {
+        let q = stat_rt
+            .ip_info
+            .as_ref()
+            .map(|i| i.query.as_str())
+            .unwrap_or("");
+        let (v4, v6) = status::nic_addrs(q);
+        stat_rt.ipv4 = v4;
+        stat_rt.ipv6 = v6;
+    }
+
     // Fork auto-detect: detected values travel in separate fields so the
     // server can apply explicit > backend > detected precedence. The
     // geoip lookup itself runs on the existing hourly refresh_ip_info

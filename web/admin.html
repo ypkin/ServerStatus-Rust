@@ -39,6 +39,7 @@ label{display:inline-block;min-width:96px}
 .nav .spacer{flex:1}
 .view{display:none}.view.active{display:block}
 .flag{font-size:16px}
+.flag-img{width:20px;vertical-align:middle}
 .pen{color:#16a34a;background:none;border:0;cursor:pointer;font-size:15px;padding:0 2px;line-height:1}
 </style>
 </head>
@@ -85,7 +86,7 @@ label{display:inline-block;min-width:96px}
       <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量">
       <label>计费模式</label><select id="f_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
       <label>重置日</label><input id="f_ms" type="number" min="1" max="31" value="1"><br>
-      <label>开始日期</label><input id="f_start" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽 Mbps</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><br>
+      <label>开始日期</label><input id="f_start" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><select id="f_bw_unit"><option value="1">Mbps</option><option value="1000">Gbps</option><option value="1000000">Tbps</option></select><br>
       <label>备注</label><input id="f_note" size="40" placeholder="仅后台可见"> <label>公开备注</label><input id="f_pnote" size="40" placeholder="显示在主面板卡片上"><br>
       <button onclick="saveHostForm()">保存</button> <button onclick="closeHostForm()">取消</button>
       <div id="newInstall" class="mono" style="display:none"></div>
@@ -181,12 +182,26 @@ function showView(v){
   const el = $('view-'+v); if (el) el.classList.add('active');
   document.querySelectorAll('.nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === v));
 }
-// Flag emoji from a 2-letter country code, plus common name mapping for
-// hand-filled location text. Unknown input yields '' (text only).
-function flagEmoji(code){
+// Flag image from a 2-letter country code, plus common name mapping for
+// hand-filled location text. Emoji regional indicators render as bare
+// letter codes (HK/US) in some browsers, so flags are <img> from
+// flagcdn (nezha does the same); unknown input yields no image, never
+// a guessed flag. onerror hides a missing file instead of a broken icon.
+function flagCode(code, text){
   code = (code||'').toUpperCase();
-  if (!/^[A-Z]{2}$/.test(code)) return '';
-  return String.fromCodePoint.apply(null, [...code].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+  if (/^[A-Z]{2}$/.test(code)) return code;
+  const t = (text||'').trim();
+  if (/^[A-Za-z]{2}$/.test(t)) return t.toUpperCase();
+  const low = t.toLowerCase();
+  for (const cc of Object.keys(COUNTRY_NAMES)) {
+    if (COUNTRY_NAMES[cc].some(n => low.includes(n))) return cc;
+  }
+  return '';
+}
+function flagImg(code, text){
+  const cc = flagCode(code, text);
+  if (!cc) return '';
+  return '<img class="flag-img" src="https://flagcdn.com/w40/' + cc.toLowerCase() + '.png" alt="' + cc + '" title="' + cc + '" onerror="this.style.display=\'none\'">';
 }
 const COUNTRY_NAMES = {
   US:['united states','美国'], CN:['china','中国'], HK:['hong kong','香港'], TW:['taiwan','台湾'],
@@ -200,16 +215,7 @@ const COUNTRY_NAMES = {
   MX:['mexico','墨西哥'], NZ:['new zealand','新西兰'], ID:['indonesia','印尼'], MY:['malaysia','马来西亚'],
   TH:['thailand','泰国'], VN:['vietnam','越南'], PH:['philippines','菲律宾'], IL:['israel','以色列'],
 };
-function flagFor(code, text){
-  if (code) { const f = flagEmoji(code); if (f) return f; }
-  const t = (text||'').trim();
-  if (/^[A-Za-z]{2}$/.test(t)) { const f = flagEmoji(t); if (f) return f; }
-  const low = t.toLowerCase();
-  for (const cc of Object.keys(COUNTRY_NAMES)) {
-    if (COUNTRY_NAMES[cc].some(n => low.includes(n))) return flagEmoji(cc);
-  }
-  return '';
-}
+
 async function login() {
   try {
     const j = await api('/api/admin/authorize','POST',{username:$('u').value, password:$('p').value});
@@ -239,9 +245,21 @@ let editingName = null;
 // enough or horizontal scroll, never broken mid-address). A missing
 // stack shows "v6 —" with no copy button; a present address gets its own
 // copy button that copies the bare address (no v4/v6 prefix).
-function ipCell(query){
+// Input is a stats entry: prefer the client's real NIC addresses
+// (st.ipv4/st.ipv6, fork proto fields 56/57) and fall back to the single
+// geoip query address when the client has not reported them (old
+// client); a bare string argument still works as the old query path.
+function ipCell(st){
   let v4 = '', v6 = '';
-  if (query) { if (query.includes(':')) v6 = query; else v4 = query; }
+  if (st && typeof st === 'object') {
+    v4 = st.ipv4 || '';
+    v6 = st.ipv6 || '';
+    const q = st.ip_info && st.ip_info.query;
+    if (!v4 && q && !q.includes(':')) v4 = q;
+    if (!v6 && q && q.includes(':')) v6 = q;
+  } else if (st) {
+    if (st.includes(':')) v6 = st; else v4 = st;
+  }
   function line(label, addr){
     if (!addr) return '<span class="ip-line">' + label + ' —</span>';
     return '<span class="ip-line">' + label + ' ' + esc(addr)
@@ -288,29 +306,21 @@ async function loadHosts() {
   if (tags.includes(cur)) sel.value = cur; else sel.value = '';
   const want = sel.value;
   const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
-  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>排序</th><th>节点</th><th>显示名</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽 Mbps</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
+  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
   for (const h of rows) {
     const st = statsByName[h.name] || {};
-    const flag = flagFor(st.country_code, h.location);
+    const flag = flagImg(st.country_code, h.location);
     const ver = st.version || (st.sys_info && st.sys_info.version) || '—';
-    const ip = ipCell(st.ip_info && st.ip_info.query);
+    const ip = ipCell(st);
     const cur = (h.currency && h.currency.trim()) ? h.currency.trim() : '$';
     const feeCell = (h.annual_fee > 0) ? esc(cur) + h.annual_fee : '—';
-    const locParts = [];
-    if (flag) locParts.push('<span class="flag">' + flag + '</span>');
-    if (h.location) locParts.push(esc(h.location));
-    let locCell = locParts.join(' ');
-    if (h.type) locCell += (locCell ? ' / ' : '') + esc(h.type);
-    if (!locCell) locCell = '—';
     html += '<tr data-name="'+esc(h.name)+'"><td class="drag-handle" title="拖动排序">☰</td>'
       + '<td><input type="checkbox" class="host-check" value="'+esc(h.name)+'"></td>'
-      + '<td><span class="flag">'+flag+'</span></td>'
-      + '<td class="nw">'+h.weight+'</td>'
-      + '<td class="nw">'+esc(h.name)+'</td><td class="nw">'+esc(h.alias)+'</td><td class="nw">'+esc(h.tag || '默认')+'</td>'
+      + '<td>'+flag+'</td>'
+      + '<td class="nw">'+esc(h.name)+'</td><td class="nw">'+esc(h.tag || '默认')+'</td>'
       + '<td>'+ip+'</td><td class="nw">'+esc(ver)+'</td>'
-      + '<td class="loc">'+locCell+'</td>'
       + '<td class="nw">'+Math.round(h.traffic_limit/GiB)+'</td><td class="nw">'+esc(h.traffic_mode)+'</td><td class="nw">'+h.monthstart+'</td>'
-      + '<td class="nw">'+esc(h.plan_start_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+(h.bandwidth_mbps||0)+'</td>'
+      + '<td class="nw">'+esc(h.plan_start_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+fmtBw(h.bandwidth_mbps||0)+'</td>'
       + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+' <button class="pen" title="修改公开备注" onclick="editPublicNote(\''+h.name+'\')">✎</button></td>'
       + '<td class="nw"><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
       + '<td class="nw"><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
@@ -407,6 +417,31 @@ function hostFormCurrency(){
   if ($('f_cur').value === 'custom') return $('f_cur_custom').value.trim();
   return $('f_cur').value;
 }
+// Bandwidth display: adaptive unit, storage stays Mbps.
+// <1000 -> Mbps, >=1000 -> Gbps, >=1000000 -> Tbps; values are
+// trimmed (1.5Gbps, not 1.500Gbps) and never re-denominated on save.
+function fmtBw(mbps){
+  mbps = Number(mbps) || 0;
+  if (mbps >= 1000000) return trimNum(mbps / 1000000) + 'Tbps';
+  if (mbps >= 1000) return trimNum(mbps / 1000) + 'Gbps';
+  return mbps + 'Mbps';
+}
+function trimNum(v){
+  return String(Math.round(v * 1000) / 1000);
+}
+// Bandwidth form: number + unit select; the stored value is always
+// Mbps, converted on save (unit multipliers) and back on edit (the
+// largest unit that keeps the value exact to 3 decimals).
+function setBwForm(mbps){
+  mbps = mbps || 0;
+  let v = mbps, u = '1';
+  if (mbps >= 1000000) { v = trimNum(mbps / 1000000); u = '1000000'; }
+  else if (mbps >= 1000) { v = trimNum(mbps / 1000); u = '1000'; }
+  $('f_bw').value = v; $('f_bw_unit').value = u;
+}
+function bwFormMbps(){
+  return Math.round((parseFloat($('f_bw').value) || 0) * parseInt($('f_bw_unit').value));
+}
 function toggleAll(box){
   document.querySelectorAll('.host-check').forEach(c => c.checked = box.checked);
 }
@@ -452,7 +487,7 @@ function openHostForm(mode, name){
     set('f_name',''); set('f_pass',''); set('f_alias',''); set('f_tag','');
     set('f_location',''); set('f_type',''); set('f_weight','');
     set('f_limit','0'); $('f_mode').value='sum'; set('f_ms','1');
-    set('f_start',''); set('f_fee',''); set('f_bw',''); set('f_note',''); set('f_pnote','');
+    set('f_start',''); set('f_fee',''); set('f_bw',''); $('f_bw_unit').value = '1'; set('f_note',''); set('f_pnote','');
     $('f_cur').value = '$'; set('f_cur_custom',''); toggleCurCustom();
     $('f_name').readOnly = false; $('f_pass').placeholder = '客户端密码（必填）';
   } else {
@@ -461,7 +496,7 @@ function openHostForm(mode, name){
     set('f_name', h.name); set('f_pass',''); set('f_alias', h.alias); set('f_tag', h.tag||'');
     set('f_location', h.location); set('f_type', h.type); set('f_weight', h.weight);
     set('f_limit', Math.round(h.traffic_limit/GiB)); $('f_mode').value = h.traffic_mode; set('f_ms', h.monthstart);
-    set('f_start', h.plan_start_date||''); set('f_fee', h.annual_fee||0); set('f_bw', h.bandwidth_mbps||0);
+    set('f_start', h.plan_start_date||''); set('f_fee', h.annual_fee||0); setBwForm(h.bandwidth_mbps||0);
     const cur = (h.currency || '$').trim() || '$';
     if (['$','¥','£','€'].includes(cur)) { $('f_cur').value = cur; set('f_cur_custom',''); }
     else { $('f_cur').value = 'custom'; set('f_cur_custom', cur); }
@@ -479,7 +514,7 @@ async function saveHostForm(){
     if (editingName) {
       const body = {alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:parseInt($('f_bw').value)||0,
+        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);
@@ -494,7 +529,7 @@ async function saveHostForm(){
       if (!pw) { showMsg('添加时密码不能为空', false); return; }
       const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:parseInt($('f_bw').value)||0,
+        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);

@@ -133,6 +133,15 @@ message StatRequest {
   // exists, so explicit settings always win.
   string location_detected = 54;
   string type_detected = 55;
+
+  // Fork extension: real NIC addresses for the admin IP column.
+  // The old column only had ip_info.query (one geoip egress IP, almost
+  // always v4), so v6 was always —. ipv4 prefers a public NIC address
+  // and falls back to the geoip egress v4 on NAT boxes; ipv6 is a
+  // global unicast NIC address. Empty = not reported (old client):
+  // the admin then falls back to the query address.
+  string ipv4 = 56;
+  string ipv6 = 57;
 }
 
 message Response {

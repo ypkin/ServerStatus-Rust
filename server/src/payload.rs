@@ -148,6 +148,13 @@ pub struct HostStat {
     // do not report one, never fabricated.
     #[serde(default)]
     pub version: String,
+    // Fork: real NIC addresses (StatRequest.ipv4/ipv6, proto fields 56/57).
+    // Empty for old clients; the admin IP cell then falls back to the
+    // single geoip query address.
+    #[serde(default)]
+    pub ipv4: String,
+    #[serde(default)]
+    pub ipv6: String,
 
     pub cpu: f64,
     pub memory_total: u64,

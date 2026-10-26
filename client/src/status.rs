@@ -92,6 +92,118 @@ macro_rules! exec_shell_cmd_fetch_u32 {
 /// -L flag, so that pipeline prints nothing, wc -l yields 0, and the
 /// old `0 - 2` wrapped to 4294967294 in release builds (seen live on
 /// the two Alpine nodes). /proc works identically on glibc and musl.
+/// Classification of an IPv4 NIC address for the admin IP column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V4Class {
+    /// Public address: reported as the node's real IPv4.
+    Public,
+    /// RFC1918/CGNAT address: only used when no public address exists
+    /// and the geoip egress address is unavailable.
+    Private,
+    /// Loopback, link-local, multicast, documentation, benchmarking or
+    /// reserved: never reported.
+    Skip,
+}
+
+/// Classify one IPv4 address for nic_addrs.
+/// The std helpers is_benchmarking/is_reserved/is_shared/is_documentation
+/// are still unstable on this toolchain, so the ranges are matched by
+/// octets directly: benchmarking 198.18/15, reserved 240/4, CGNAT
+/// 100.64/10, documentation 192.0.2/24 + 198.51.100/24 + 203.0.113/24,
+/// plus 0/8 ("this network"). is_private covers 10/8, 172.16/12 and
+/// 192.168/16 and is stable.
+pub fn classify_v4(ip: std::net::Ipv4Addr) -> V4Class {
+    let o = ip.octets();
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_link_local() {
+        return V4Class::Skip;
+    }
+    if o[0] == 0
+        || (o[0] == 198 && (o[1] & 0xfe) == 18)
+        || o[0] >= 240
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+    {
+        return V4Class::Skip;
+    }
+    if ip.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64) {
+        return V4Class::Private;
+    }
+    V4Class::Public
+}
+
+/// True for global unicast IPv6 (2000::/3). This excludes loopback
+/// (::1), link-local (fe80::/10), ULA (fc00::/7) and multicast
+/// (ff00::/8) by construction, so no separate checks are needed.
+pub fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
+    ip.segments()[0] & 0xe000 == 0x2000
+}
+
+/// Real NIC addresses for the admin IP column (fork).
+/// The old column only had the geoip egress IP (one address, almost
+/// always v4), so v6 was always —. Here:
+/// - v4 = first public NIC address (sorted, deterministic); if the box
+///   is behind NAT (NIC v4 is private), the geoip egress v4 wins, and
+///   only if that is missing does a private NIC address get used.
+/// - v6 = first global unicast NIC address (sorted, deterministic);
+///   a geoip v6 egress address is only a fallback when the NIC has none.
+/// Missing values stay empty; the admin falls back to the geoip query
+/// address, so old behaviour is preserved for old clients.
+/// sysinfo-gated: the caller only calls this with the sysinfo feature
+/// on; non-sysinfo builds keep empty addresses.
+#[cfg(feature = "sysinfo")]
+pub fn nic_addrs(geoip_query: &str) -> (String, String) {
+    use std::net::IpAddr;
+
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut v4_pub: Vec<String> = Vec::new();
+    let mut v4_priv: Vec<String> = Vec::new();
+    let mut v6: Vec<String> = Vec::new();
+    for (_name, data) in &networks {
+        for net in data.ip_networks() {
+            match net.addr {
+                IpAddr::V4(ip) => match classify_v4(ip) {
+                    V4Class::Public => v4_pub.push(ip.to_string()),
+                    V4Class::Private => v4_priv.push(ip.to_string()),
+                    V4Class::Skip => {}
+                },
+                IpAddr::V6(ip) => {
+                    if is_global_v6(ip) {
+                        v6.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    v4_pub.sort();
+    v4_priv.sort();
+    v6.sort();
+    let v4 = v4_pub
+        .into_iter()
+        .next()
+        .or_else(|| {
+            if !geoip_query.is_empty() && !geoip_query.contains(':') {
+                Some(geoip_query.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| v4_priv.into_iter().next())
+        .unwrap_or_default();
+    let v6 = v6
+        .into_iter()
+        .next()
+        .or_else(|| {
+            if !geoip_query.is_empty() && geoip_query.contains(':') {
+                Some(geoip_query.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    (v4, v6)
+}
+
 fn count_threads_from_proc() -> u32 {
     let mut total: u64 = 0;
     let Ok(procs) = std::fs::read_dir("/proc") else {
@@ -592,5 +704,47 @@ pub fn sample(args: &Args, stat: &mut StatRequest) {
         let o = &*G_PING_10086_V6.get().unwrap().lock().unwrap();
         stat.ping_10086_v6 = o.lost_rate.into();
         stat.time_10086_v6 = o.ping_time.into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn v4_classification_covers_live_fleet_shapes() {
+        // Public egress of a normal VPS.
+        assert_eq!(classify_v4(Ipv4Addr::new(8, 8, 8, 8)), V4Class::Public);
+        // NAT boxes: RFC1918 and CGNAT are private, never skipped.
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(192, 168, 1, 1)),
+            V4Class::Private
+        );
+        assert_eq!(classify_v4(Ipv4Addr::new(10, 0, 0, 1)), V4Class::Private);
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(100, 64, 0, 1)),
+            V4Class::Private
+        );
+        // Never reported, whatever the box.
+        assert_eq!(classify_v4(Ipv4Addr::LOCALHOST), V4Class::Skip);
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(169, 254, 1, 1)),
+            V4Class::Skip
+        );
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            V4Class::Skip
+        );
+    }
+
+    #[test]
+    fn v6_global_unicast_only() {
+        assert!(is_global_v6("2401:8360:1:4f::a".parse().unwrap()));
+        assert!(is_global_v6("2001:470:18:aec::2".parse().unwrap()));
+        assert!(!is_global_v6(Ipv6Addr::LOCALHOST));
+        assert!(!is_global_v6("fe80::1".parse().unwrap()));
+        assert!(!is_global_v6("fc00::1".parse().unwrap()));
+        assert!(!is_global_v6("ff02::1".parse().unwrap()));
     }
 }
