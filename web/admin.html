@@ -40,7 +40,7 @@ label{display:inline-block;min-width:96px}
     <label>流量限额 GiB</label><input id="h_limit" type="number" min="0" value="0" placeholder="0=不限量">
     <label>计费模式</label><select id="h_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
     <label>重置日</label><input id="h_ms" type="number" min="1" max="31" value="1"><br>
-    <label>开始日期</label><input id="h_start" type="date"> <label>年费</label><input id="h_fee" type="number" step="0.01" min="0" placeholder="如 15.99"> <label>带宽 Mbps</label><input id="h_bw" type="number" min="0" placeholder="如 1000"><br>
+    <label>开始日期</label><input id="h_start" type="date"> <label>年费 ($)</label><input id="h_fee" type="number" step="0.01" min="0" placeholder="如 15.99"> <label>带宽 Mbps</label><input id="h_bw" type="number" min="0" placeholder="如 1000"><br>
     <button onclick="addHost()">添加并生成一键命令</button>
     <div id="newInstall" class="mono" style="display:none"></div>
   </div>
@@ -53,7 +53,7 @@ label{display:inline-block;min-width:96px}
     <label>地区</label><input id="g_location"> <label>类型</label><input id="g_type"><br>
     <label>流量限额 GiB</label><input id="g_limit" type="number" min="0" value="0">
     <label>计费模式</label><select id="g_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select><br>
-    <label>开始日期</label><input id="g_start" type="date"> <label>年费</label><input id="g_fee" type="number" step="0.01" min="0"> <label>带宽 Mbps</label><input id="g_bw" type="number" min="0">
+    <label>开始日期</label><input id="g_start" type="date"> <label>年费 ($)</label><input id="g_fee" type="number" step="0.01" min="0"> <label>带宽 Mbps</label><input id="g_bw" type="number" min="0">
     <button onclick="addGroup()">添加分组</button>
   </div>
 
@@ -63,9 +63,33 @@ label{display:inline-block;min-width:96px}
 
   <h2>三网 ping 探针（后台统一管，客户端下次上报自动生效，不用逐台改命令行）</h2>
   <div class="card">
-    <label><input id="ping_enabled" type="checkbox" checked> 启用三网 ping</label><br>
-    <label>联通</label><input id="ping_cu" size="34"> <label>电信</label><input id="ping_ct" size="34"> <label>移动</label><input id="ping_cm" size="34"><br>
-    <button onclick="savePing()">保存 ping 设置</button>
+    <label><input id="ping_enabled" type="checkbox" checked> 启用三网 ping</label>
+    <button onclick="savePingEnabled()">保存启用状态</button>
+    <div style="overflow-x:auto">
+    <div style="min-width:760px">
+      <div style="font-weight:bold;margin:12px 0 4px">IPv4</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div style="display:flex;gap:6px"><input id="ping_name_cu_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+        <div style="display:flex;gap:6px"><input id="ping_name_ct_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+        <div style="display:flex;gap:6px"><input id="ping_name_cm_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+      </div>
+      <div style="font-weight:bold;margin:12px 0 4px">IPv6</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div style="display:flex;gap:6px"><input id="ping_name_cu_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+        <div style="display:flex;gap:6px"><input id="ping_name_ct_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+        <div style="display:flex;gap:6px"><input id="ping_name_cm_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="未设置"></div>
+      </div>
+    </div>
+    </div>
+    <button onclick="savePingAll()" style="margin-top:12px">保存探针设置</button>
+    <p class="hint">名称和地址都由你定；地址空着就是没设置，不测也不显示。IPv6 留空表示该运营商不测 v6。</p>
+  </div>
+
+  <h2>探针总览（v4/v6 实测值）</h2>
+  <div class="card">
+    <button onclick="loadPingOverview()">刷新总览</button>
+    <span class="hint">主面板是预编译页面，只显示 v4 三个值；v6 值请在这里看。— 表示该项未探测（未配 v6 地址、节点无 v6，或暂未上报）。</span>
+    <div id="pingOverview"></div>
   </div>
 
   <h2>掉线推送（PushPlus）</h2>
@@ -95,15 +119,27 @@ function showMsg(s, ok=true){ const m=$('msg'); m.textContent=s; m.className = o
 async function login() {
   try {
     const j = await api('/api/admin/authorize','POST',{username:$('u').value, password:$('p').value});
-    TOKEN = j.token; sessionStorage.setItem('ssr_admin_token', TOKEN);
+    // The authorize response carries `access_token` (jwt.rs AuthBody);
+    // `token` is only kept as a fallback for older servers.
+    TOKEN = j.access_token || j.token; sessionStorage.setItem('ssr_admin_token', TOKEN);
     $('login').style.display='none'; $('app').style.display='block'; loadAll();
   } catch(e){ $('loginMsg').textContent = '登录失败：'+e.message; }
 }
-function logout(){ TOKEN=''; sessionStorage.removeItem('ssr_admin_token'); $('app').style.display='none'; $('login').style.display='block'; }
-async function loadAll(){ try { await Promise.all([loadHosts(), loadGroups(), loadTraffic(), loadPing(), loadPushPlus()]); } catch(e){ showMsg('加载失败：'+e.message, false); } }
+function backToLogin(msg) {
+  TOKEN=''; sessionStorage.removeItem('ssr_admin_token');
+  $('app').style.display='none'; $('login').style.display='block';
+  if (msg) $('loginMsg').textContent = msg;
+}
+function logout(){ backToLogin(); }
+async function loadAll(){ try { await Promise.all([loadHosts(), loadGroups(), loadTraffic(), loadPing(), loadPingOverview(), loadPushPlus()]); } catch(e){
+  // A stale/invalid token used to leave the user staring at empty tables.
+  // Bounce back to the login form instead so they can sign in again.
+  if (String(e.message).includes('Invalid token')) backToLogin('登录已失效，请重新登录');
+  else showMsg('加载失败：'+e.message, false);
+} }
 async function loadHosts() {
   const hosts = await api('/api/admin/hosts');
-  let html = '<table><tr><th>节点</th><th>显示名</th><th>分组</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽 Mbps</th><th>操作</th></tr>';
+  let html = '<table><tr><th>节点</th><th>显示名</th><th>分组</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费 ($)</th><th>带宽 Mbps</th><th>操作</th></tr>';
   for (const h of hosts) {
     html += '<tr><td>'+h.name+'</td><td>'+h.alias+'</td><td>'+(h.gid||'-')+'</td><td>'+h.location+' / '+h.type+'</td>'
       + '<td><input id="lim_'+h.name+'" type="number" min="0" value="'+Math.round(h.traffic_limit/GiB)+'"></td>'
@@ -127,18 +163,93 @@ async function loadGroups() {
   }
   $('groups').innerHTML = html + '<p class="hint">删除分组不踢出已注册成员；要彻底清掉需再逐个删除节点，或停掉客户端。</p>';
 }
+let trafficData = [];
 async function loadTraffic() {
   const t = await api('/api/admin/traffic');
-  let html = '<table><tr><th>节点</th><th>今日</th><th>本月</th><th>总计</th><th>已用（按计费模式）</th><th>限额</th><th>修正本月为 GiB</th></tr>';
-  for (const row of t) {
-    const gb = v => (v/GiB).toFixed(2);
-    html += '<tr><td>'+row.name+'</td><td>'+gb(row.day_rx+row.day_tx)+'</td><td>'+gb(row.month_rx+row.month_tx)+'</td><td>'+gb(row.total_rx+row.total_tx)+'</td><td>'+gb(row.month_used)+'</td><td>'+(row.traffic_limit?gb(row.traffic_limit):'不限量')+'</td><td><input id="corr_'+row.name+'" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correct(\''+row.name+'\')">修正</button></td></tr>';
-  }
-  $('traffic').innerHTML = html;
+  trafficData = t;
+  const opts = t.map(row => {
+    const label = (row.alias && row.alias !== row.name) ? (row.alias + ' (' + row.name + ')') : row.name;
+    return '<option value="'+row.name+'">'+label+'</option>';
+  }).join('');
+  $('traffic').innerHTML = '<label>节点</label><select id="traffic_node" onchange="showTrafficNode()">'+opts+'</select><div id="trafficDetail"></div>';
+  showTrafficNode();
+}
+function showTrafficNode() {
+  const sel = $('traffic_node');
+  if (!sel || !sel.value) { const d = $('trafficDetail'); if (d) d.innerHTML = ''; return; }
+  const row = trafficData.find(r => r.name === sel.value);
+  if (!row) { $('trafficDetail').innerHTML = ''; return; }
+  const gb = v => (v/GiB).toFixed(2);
+  $('trafficDetail').innerHTML = '<table><tr><th>今日</th><th>本月</th><th>总计</th><th>已用（按计费模式）</th><th>限额</th></tr>'
+    + '<tr><td>'+gb(row.day_rx+row.day_tx)+'</td><td>'+gb(row.month_rx+row.month_tx)+'</td><td>'+gb(row.total_rx+row.total_tx)+'</td><td>'+gb(row.month_used)+'</td><td>'+(row.traffic_limit?gb(row.traffic_limit):'不限量')+'</td></tr></table>'
+    + '<label>修正本月为 GiB</label><input id="traffic_corr" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correctSelected()">修正</button>';
+}
+async function correctSelected() {
+  const name = $('traffic_node').value;
+  const v = parseFloat($('traffic_corr').value);
+  if (!(v >= 0)) { showMsg('修正值须为 >= 0 的数字', false); return; }
+  try {
+    await api('/api/admin/hosts/'+encodeURIComponent(name)+'/traffic/correct','PUT',{month_used:Math.round(v*GiB)});
+    showMsg(name+' 已修正'); await loadTraffic();
+    $('traffic_node').value = name; showTrafficNode();
+  } catch(e){ showMsg('修正失败：'+e.message, false); }
+}
+let pingState = null;
+// Two-row grid form: IPv4 row + IPv6 row, three carriers per row. The
+// name input is per carrier so it appears in both rows as synced twins
+// (editing either updates the other; the save reads the IPv4-row twin).
+function syncPingName(carrier, val) {
+  $('ping_name_'+carrier+'_v4').value = val;
+  $('ping_name_'+carrier+'_v6').value = val;
 }
 async function loadPing() {
   const p = await api('/api/admin/ping');
-  $('ping_enabled').checked = !!p.enabled; $('ping_cu').value = p.cu_addr||''; $('ping_ct').value = p.ct_addr||''; $('ping_cm').value = p.cm_addr||'';
+  pingState = {enabled: !!p.enabled};
+  $('ping_enabled').checked = pingState.enabled;
+  const set = (id, v) => { $(id).value = v || ''; };
+  set('ping_name_cu_v4', p.cu_name||'联通'); set('ping_name_cu_v6', p.cu_name||'联通');
+  set('ping_name_ct_v4', p.ct_name||'电信'); set('ping_name_ct_v6', p.ct_name||'电信');
+  set('ping_name_cm_v4', p.cm_name||'移动'); set('ping_name_cm_v6', p.cm_name||'移动');
+  set('ping_addr_cu_v4', p.cu_addr_v4||p.cu_addr||''); set('ping_addr_ct_v4', p.ct_addr_v4||p.ct_addr||''); set('ping_addr_cm_v4', p.cm_addr_v4||p.cm_addr||'');
+  set('ping_addr_cu_v6', p.cu_addr_v6||''); set('ping_addr_ct_v6', p.ct_addr_v6||''); set('ping_addr_cm_v6', p.cm_addr_v6||'');
+}
+function collectPingBody() {
+  const v = id => $(id).value.trim();
+  const body = {enabled: pingState ? pingState.enabled : true,
+    cu_name: v('ping_name_cu_v4'), ct_name: v('ping_name_ct_v4'), cm_name: v('ping_name_cm_v4'),
+    cu_addr_v4: v('ping_addr_cu_v4'), ct_addr_v4: v('ping_addr_ct_v4'), cm_addr_v4: v('ping_addr_cm_v4'),
+    cu_addr_v6: v('ping_addr_cu_v6'), ct_addr_v6: v('ping_addr_ct_v6'), cm_addr_v6: v('ping_addr_cm_v6')};
+  body.cu_addr = body.cu_addr_v4; body.ct_addr = body.ct_addr_v4; body.cm_addr = body.cm_addr_v4;
+  return body;
+}
+async function savePingAll() {
+  try {
+    await api('/api/admin/ping','PUT', collectPingBody());
+    showMsg('修改成功'); await loadPing(); loadPingOverview();
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function savePingEnabled() {
+  if (!pingState) return;
+  const body = collectPingBody(); body.enabled = $('ping_enabled').checked;
+  try {
+    await api('/api/admin/ping','PUT', body);
+    showMsg('修改成功'); await loadPing();
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function loadPingOverview() {
+  try {
+    const [j, p] = await Promise.all([api('/json/stats.json'), api('/api/admin/ping')]);
+    const cu = p.cu_name||'联通', ct = p.ct_name||'电信', cm = p.cm_name||'移动';
+    const cell = (t, l) => (t > 0 || l > 0) ? (t + 'ms / ' + l + '%') : '—';
+    let html = '<table><tr><th>节点</th><th>'+cu+' v4</th><th>'+cu+' v6</th><th>'+ct+' v4</th><th>'+ct+' v6</th><th>'+cm+' v4</th><th>'+cm+' v6</th></tr>';
+    for (const s of (j.servers || [])) {
+      html += '<tr><td>' + (s.alias || s.name) + '</td>'
+        + '<td>' + cell(s.time_10010, s.ping_10010) + '</td><td>' + cell(s.time_10010_v6, s.ping_10010_v6) + '</td>'
+        + '<td>' + cell(s.time_189, s.ping_189) + '</td><td>' + cell(s.time_189_v6, s.ping_189_v6) + '</td>'
+        + '<td>' + cell(s.time_10086, s.ping_10086) + '</td><td>' + cell(s.time_10086_v6, s.ping_10086_v6) + '</td></tr>';
+    }
+    $('pingOverview').innerHTML = html + '</table>';
+  } catch(e){ $('pingOverview').innerHTML = '<span class="err">总览加载失败：' + e.message + '</span>'; }
 }
 async function loadPushPlus() {
   const p = await api('/api/admin/notify/pushplus');
@@ -188,14 +299,6 @@ async function addGroup() {
 async function delGroup(gid) {
   if (!confirm('删除分组 '+gid+'？已注册成员不会自动下线。')) return;
   try { await api('/api/admin/groups/'+encodeURIComponent(gid),'DELETE'); showMsg('分组已删除'); loadGroups(); loadHosts(); } catch(e){ showMsg('删除失败：'+e.message, false); }
-}
-async function correct(name) {
-  const v = parseFloat($('corr_'+name).value);
-  if (!(v >= 0)) { showMsg('修正值须为 >= 0 的数字', false); return; }
-  try { await api('/api/admin/hosts/'+encodeURIComponent(name)+'/traffic/correct','PUT',{month_used:Math.round(v*GiB)}); showMsg(name+' 已修正'); loadTraffic(); } catch(e){ showMsg('修正失败：'+e.message, false); }
-}
-async function savePing() {
-  try { await api('/api/admin/ping','PUT',{enabled:$('ping_enabled').checked, cu_addr:$('ping_cu').value.trim(), ct_addr:$('ping_ct').value.trim(), cm_addr:$('ping_cm').value.trim()}); showMsg('ping 设置已保存，客户端下次上报生效'); } catch(e){ showMsg('保存失败：'+e.message, false); }
 }
 async function savePushPlus() {
   try { await api('/api/admin/notify/pushplus','PUT',{enabled:$('pp_enabled').checked, token:$('pp_token').value, title:$('pp_title').value.trim(), channel:$('pp_channel').value.trim(), offline_tpl:$('pp_offline').value, online_tpl:$('pp_online').value}); showMsg('PushPlus 设置已保存'); $('pp_token').value=''; loadPushPlus(); } catch(e){ showMsg('保存失败：'+e.message, false); }
