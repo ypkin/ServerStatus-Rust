@@ -12,7 +12,8 @@
 // carries the live probe lines plus a Prism-ported chart (1h/6h/24h/7d
 // ranges, 削峰/平滑 toggles, one line per user-named probe, v4/v6
 // split); the chart is sampled by the browser itself from the live
-// stats stream (one value per probe/stack per 30 s refresh), so
+// stats stream (one value per probe/stack per 30 s refresh, plus an
+// immediate first point seeded from the live values on expand), so
 // closing the browser restarts its history. The overview tab carries
 // only what React's own expanded row does not already show (plan,
 // system, CPU model, traffic, boot time, online duration, last
@@ -458,7 +459,7 @@
       empty.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
       empty.textContent = (series.length === 0)
         ? '未设置探针：在后台探针页填入地址并保存后，页面打开时开始采样画线。'
-        : '已有探针，暂无采样：保持页面打开，约 30 秒后开始出线。';
+        : '已有探针，暂无有效采样：当前采样均为超时或未返回延迟，稍后随采样更新。';
       wrap.appendChild(empty);
       return wrap;
     }
@@ -538,14 +539,20 @@
       });
       flush();
     });
+    // Floating tooltip (batch 6): the old static line under the chart
+    // was easy to miss, and a handler on the overlay rect alone is
+    // fragile if anything sits above it — so the tip now follows the
+    // cursor (fixed position, pointer-events none so it never steals
+    // the mouse) and the handler lives on the svg itself, which every
+    // hover over the chart bubbles to. Tooltip values are raw bucket
+    // values, never despiked/smoothed (Prism's rule). The time prefix
+    // uses the first series that actually has points; an all-empty
+    // series list cannot throw on points[0].
     var tip = document.createElement('div');
-    tip.style.cssText = 'font-size:11px;color:#374151;margin-top:4px;min-height:16px';
-    var hover = document.createElementNS(svgNS, 'rect');
-    hover.setAttribute('x', PL); hover.setAttribute('y', 0);
-    hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
-    hover.setAttribute('fill', 'transparent');
-    hover.addEventListener('mousemove', function (e) {
+    tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;white-space:nowrap;display:none';
+    var showTip = function (e) {
       var rect = svg.getBoundingClientRect();
+      if (!rect.width) return;
       var px = (e.clientX - rect.left) / rect.width * W;
       var ts = t0 + (px - PL) / (W - PL - PR) * (t1 - t0);
       var parts = drawn.map(function (s) {
@@ -557,13 +564,26 @@
         var v = best >= 0 ? s.raw[best] : null;
         return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
       });
-      var t = drawn[0].points.reduce(function (acc, p) {
+      var tSeries = null;
+      for (var si = 0; si < drawn.length; si++) {
+        if (drawn[si].points.length) { tSeries = drawn[si]; break; }
+      }
+      var t = tSeries ? tSeries.points.reduce(function (acc, p) {
         return Math.abs(p[0] - ts) < Math.abs(acc - ts) ? p[0] : acc;
-      }, drawn[0].points[0][0]);
-      tip.textContent = fmtT(t) + ' · ' + parts.join(' · ');
-    });
-    hover.addEventListener('mouseleave', function () { tip.textContent = ''; });
+      }, tSeries.points[0][0]) : null;
+      tip.textContent = (t !== null ? fmtT(t) + ' · ' : '') + parts.join(' · ');
+      tip.style.display = 'block';
+      tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
+      tip.style.top = Math.min(e.clientY + 12, window.innerHeight - 40) + 'px';
+    };
+    var hideTip = function () { tip.style.display = 'none'; };
+    var hover = document.createElementNS(svgNS, 'rect');
+    hover.setAttribute('x', PL); hover.setAttribute('y', 0);
+    hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
+    hover.setAttribute('fill', 'transparent');
     svg.appendChild(hover);
+    svg.addEventListener('mousemove', showTip);
+    svg.addEventListener('mouseleave', hideTip);
     var legend = document.createElement('div');
     legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#374151;margin-top:4px';
     drawn.forEach(function (s, idx) {
@@ -580,6 +600,32 @@
     wrap.appendChild(svg);
     wrap.appendChild(tip);
     return wrap;
+  }
+
+  // Batch 6: seed the first point immediately from the live probe
+  // values (planByName carries current ping_probes). Expanding a node
+  // or switching to the latency tab used to show an empty chart until
+  // the next 30 s refresh sampled — now the first point is drawn at
+  // once. Only seeds keys with no samples yet; the 30 s rhythm then
+  // takes over, so repeated injects never skew the minute average.
+  // A timeout seed (val null) leaves n=0, i.e. a gap, not a fake point.
+  function seedImmediateSample(srv) {
+    if (!srv || !srv.ping_probes) return;
+    var now = Math.floor(Date.now() / 1000);
+    var minute = Math.floor(now / 60) * 60;
+    if (!latHist[srv.name]) { latHist[srv.name] = {}; latPend[srv.name] = {}; }
+    srv.ping_probes.forEach(function (p) {
+      ['v4', 'v6'].forEach(function (stack) {
+        var val = latVal(p[stack]);
+        if (val === undefined) return;
+        var key = p.name + ' ' + stack;
+        if (latHist[srv.name][key]) return;
+        latHist[srv.name][key] = { min: [], hour: [] };
+        latPend[srv.name][key] = { min: { bucket: minute, sum: 0, n: 0 }, hour: { bucket: 0, sum: 0, n: 0 } };
+        if (val !== null) { latPend[srv.name][key].min.sum = val; latPend[srv.name][key].min.n = 1; }
+        latLastSample[srv.name] = now;
+      });
+    });
   }
 
   function latControls(name, st) {
@@ -634,12 +680,13 @@
     });
     block.appendChild(tabs);
     if (st.tab === 'latency') {
+      seedImmediateSample(srv);
       probeLines(srv).forEach(function (text) { block.appendChild(latLine(text)); });
       block.appendChild(latControls(srv.name, st));
       block.appendChild(latChart(srv.name, st));
       var note = document.createElement('div');
       note.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:4px';
-      note.textContent = '曲线为浏览器实时采样：页面打开期间每 30 秒采一次实时值；关闭浏览器后历史从头采。7d 为小时均值。';
+      note.textContent = '曲线为浏览器实时采样：展开即用当前实时值画出首点，之后每 30 秒追加一个点；关闭浏览器后历史从头采。7d 为小时均值。';
       block.appendChild(note);
     } else {
       var probes = probeLines(srv);
