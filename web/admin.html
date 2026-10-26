@@ -306,7 +306,7 @@ async function loadHosts() {
   if (tags.includes(cur)) sel.value = cur; else sel.value = '';
   const want = sel.value;
   const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
-  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
+  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>位置</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
   for (const h of rows) {
     const st = statsByName[h.name] || {};
     const flag = flagImg(st.country_code, h.location);
