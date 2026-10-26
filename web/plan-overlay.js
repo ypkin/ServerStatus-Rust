@@ -628,6 +628,23 @@
       });
       flush();
     });
+    // Hover vertical guide (2026-10-27): a dashed line through the
+    // plot height at the column the tooltip is actually showing —
+    // the live column, or the snapped column on a gap hover (never
+    // the raw mouse x, so line and tip time always agree). Hidden
+    // until hover; recreated with every chart render, so a range
+    // switch or re-inject can never leave a stale misplaced line.
+    // The card stays light even in dark mode, so one grey works in
+    // both themes; 1px dashed, visible without shouting.
+    var vline = document.createElementNS(svgNS, 'line');
+    vline.setAttribute('data-ssr-vline', '1');
+    vline.setAttribute('x1', PL); vline.setAttribute('x2', PL);
+    vline.setAttribute('y1', PT); vline.setAttribute('y2', H - PB);
+    vline.setAttribute('stroke', '#6b7280'); vline.setAttribute('stroke-width', '1');
+    vline.setAttribute('stroke-dasharray', '4 3');
+    vline.setAttribute('pointer-events', 'none');
+    vline.style.display = 'none';
+    svg.appendChild(vline);
     // Floating tooltip (batch 6): the old static line under the chart
     // was easy to miss, and a handler on the overlay rect alone is
     // fragile if anything sits above it — so the tip now follows the
@@ -690,6 +707,16 @@
           showTs = snapTs;
         }
       }
+      // Guide line at the column the tip shows (snapped column on
+      // gaps), never the raw mouse x; hidden when the tip shows no
+      // column at all (the defensive all-empty case).
+      if (showTs !== null && !(allDash && snapTs === null)) {
+        var vx = X(showTs);
+        vline.setAttribute('x1', vx); vline.setAttribute('x2', vx);
+        vline.style.display = 'block';
+      } else {
+        vline.style.display = 'none';
+      }
       // Vertical layout (2026-10-27): time on its own line, one
       // probe road per line (only configured roads — drawn is built
       // from configured probes only; a missing value still shows a
@@ -721,7 +748,7 @@
       tip.style.left = Math.max(8, Math.min(e.clientX + 12, window.innerWidth - tw - 8)) + 'px';
       tip.style.top = Math.max(8, Math.min(e.clientY + 12, window.innerHeight - th - 8)) + 'px';
     };
-    var hideTip = function () { tip.style.display = 'none'; };
+    var hideTip = function () { tip.style.display = 'none'; vline.style.display = 'none'; };
     var hover = document.createElementNS(svgNS, 'rect');
     hover.setAttribute('x', PL); hover.setAttribute('y', 0);
     hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
