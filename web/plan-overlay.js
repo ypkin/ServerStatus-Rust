@@ -1,5 +1,5 @@
-// Fork overlay: expandable node details on the main panel without
-// rebuilding the precompiled React bundle.
+// Fork overlay: group pills + expandable node details on the main panel
+// without rebuilding the precompiled React bundle.
 //
 // The React table renders one row per server; the first cell holds the
 // display name (alias, falling back to the node name) inside a truncated
@@ -7,9 +7,14 @@
 // cell expands a nezha-style detail block under the name (plan, system,
 // CPU, disk, memory, swap, traffic, load, processes, connections, boot
 // time, uptime, probes, public note); clicking again collapses it.
+// A nezha-style pill bar above the panel groups rows by Tag (empty Tag =
+// 默认组): dark rounded pills, white bold text, "name count"; clicking a
+// pill filters rows to that Tag, clicking it again (or 全部) clears.
 // React wipes foreign DOM on every stats refresh, so a MutationObserver
-// re-applies indicators and detail blocks (loop-safe: only touch the DOM
-// when the wanted content differs).
+// re-applies indicators, detail blocks and the row filter (loop-safe:
+// only touch the DOM when the wanted content differs). The pill bar
+// itself lives before #root, outside React's tree, so React never wipes
+// it; it is rebuilt only when its signature (counts/active) changes.
 //
 // Data comes from /json/stats.json (public). Anything missing is omitted,
 // never fabricated (in particular no expiry date is derived).
@@ -18,6 +23,65 @@
   var GiB = 1024 * 1024 * 1024;
   var planByName = {};
   var expanded = {}; // node name -> true while its detail block is open
+  var activeTag = null; // null = all rows; '' = default group; else a Tag
+  var haveStats = false; // true once stats.json has loaded at least once
+
+  function tagDisplay(tag) { return tag ? tag : '默认'; }
+
+  function pillsData() {
+    var counts = {};
+    Object.keys(planByName).forEach(function (n) {
+      var t = planByName[n].tag || '';
+      counts[t] = (counts[t] || 0) + 1;
+    });
+    return counts;
+  }
+
+  function renderPills() {
+    if (!haveStats) return;
+    var counts = pillsData();
+    var tags = Object.keys(counts).sort(function (a, b) {
+      if (a === '') return -1;
+      if (b === '') return 1;
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+    var total = 0;
+    tags.forEach(function (t) { total += counts[t]; });
+    var sigParts = ['all:' + total, 'active:' + (activeTag === null ? '*' : activeTag)];
+    tags.forEach(function (t) { sigParts.push(t + '=' + counts[t]); });
+    var sig = sigParts.join('|');
+    var bar = document.getElementById('ssr-tag-pills');
+    if (bar && bar.getAttribute('data-ssr-sig') === sig) return;
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'ssr-tag-pills';
+      var root = document.getElementById('root');
+      if (root && root.parentNode) root.parentNode.insertBefore(bar, root);
+      else document.body.insertBefore(bar, document.body.firstChild);
+    }
+    bar.setAttribute('data-ssr-sig', sig);
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;align-items:center;';
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    var mk = function (label, tag) {
+      var b = document.createElement('button');
+      var isActive = (tag === null ? activeTag === null : activeTag === tag);
+      b.style.cssText = 'border:0;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:700;color:#fff;cursor:pointer;background:' + (isActive ? '#0a6cff' : '#374151');
+      b.textContent = label;
+      b.title = tag === null ? '显示全部节点' : '只显示 ' + tagDisplay(tag) + ' 组的节点';
+      b.addEventListener('click', function () {
+        if (tag === null) activeTag = null;
+        else if (activeTag === tag) activeTag = null;
+        else activeTag = tag;
+        renderPills();
+        inject();
+      });
+      return b;
+    };
+    bar.appendChild(mk('全部 ' + total, null));
+    tags.forEach(function (t) {
+      bar.appendChild(mk(tagDisplay(t) + ' ' + counts[t], t));
+    });
+  }
 
   function fmtGiB(bytes) {
     var v = bytes / GiB;
@@ -128,6 +192,7 @@
   function inject() {
     var names = Object.keys(planByName);
     if (!names.length) return;
+    renderPills();
     // Anchor: the alias cell div (class "truncate" inside a td).
     var cells = document.querySelectorAll('td div.truncate');
     var handled = new Set();
@@ -156,6 +221,13 @@
       }
       var wantInd = expanded[srv.name] ? '▾' : '▸';
       if (ind.textContent !== wantInd) ind.textContent = wantInd;
+      // Tag filter: hide rows outside the active pill's Tag. Unmapped
+      // rows (name not found in stats) always stay visible.
+      var tr = td.closest('tr');
+      if (tr) {
+        var wantDisp = (activeTag !== null && (srv.tag || '') !== activeTag) ? 'none' : '';
+        if (tr.style.display !== wantDisp) tr.style.display = wantDisp;
+      }
       // Detail block: present iff expanded, rebuilt only when changed.
       var block = td.querySelector('[data-ssr-detail]');
       if (!expanded[srv.name]) {
@@ -205,6 +277,7 @@
         (j.servers || []).forEach(function (s) {
           map[s.name] = {
             name: s.name,
+            tag: s.tag || '',
             display: (s.alias || s.name || '').trim(),
             plan_start_date: s.plan_start_date || '',
             annual_fee: s.annual_fee || 0,
@@ -237,6 +310,8 @@
           };
         });
         planByName = map;
+        haveStats = true;
+        renderPills();
         inject();
       })
       .catch(function () { /* keep last map; retry next interval */ });
