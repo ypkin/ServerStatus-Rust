@@ -86,7 +86,7 @@ label{display:inline-block;min-width:96px}
       <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量"> <span class="hint">填 9999 表示不限量</span>
       <label>计费模式</label><select id="f_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
       <label>重置日</label><input id="f_ms" type="number" min="1" max="31" value="1"><br>
-      <label>开始日期</label><input id="f_start" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><select id="f_bw_unit"><option value="1">Mbps</option><option value="1000">Gbps</option><option value="1000000">Tbps</option></select><br>
+      <label>开始日期</label><input id="f_start" type="date"> <label>结束日期</label><input id="f_end" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><select id="f_bw_unit"><option value="1">Mbps</option><option value="1000">Gbps</option><option value="1000000">Tbps</option></select><br>
       <label>备注</label><input id="f_note" size="40" placeholder="仅后台可见"> <label>公开备注</label><input id="f_pnote" size="40" placeholder="显示在主面板卡片上"><br>
       <button onclick="saveHostForm()">保存</button> <button onclick="closeHostForm()">取消</button>
       <div id="newInstall" class="mono" style="display:none"></div>
@@ -241,14 +241,25 @@ async function loadAll(){ try { await Promise.all([loadHosts(), loadTraffic(), l
 let allHosts = [];
 let statsByName = {};
 let editingName = null;
-// IP cell: exactly two lines, v4 first, v6 second, each nowrap (wide
-// enough or horizontal scroll, never broken mid-address). A missing
-// stack shows "v6 —" with no copy button; a present address gets its own
-// copy button that copies the bare address (no v4/v6 prefix).
+// IP cell: exactly two lines, v4 first, v6 second, each nowrap. The v6
+// line is shortened (head + … + tail, about as long as a v4 line) so a
+// long v6 address never wraps and inflates the row height; the column
+// is not widened. A missing stack shows "v6 —" with no copy button; a
+// present address gets its own copy button that copies the full bare
+// address (no v4/v6 prefix), with the full address on hover (title).
 // Input is a stats entry: prefer the client's real NIC addresses
 // (st.ipv4/st.ipv6, fork proto fields 56/57) and fall back to the single
 // geoip query address when the client has not reported them (old
 // client); a bare string argument still works as the old query path.
+// Batch 3 (corrected): the v6 row shows a shortened form — head and
+// tail kept, middle replaced by … — so it reads about as long as a
+// v4 row and never wraps and inflates the row height. The column is
+// NOT widened. Copy still copies the full address (data-ip), and
+// hovering shows the full address (title). v4 rows are untouched.
+function shortV6(addr){
+  if (addr.length <= 19) return addr;
+  return addr.slice(0, 10) + '…' + addr.slice(-8);
+}
 function ipCell(st){
   let v4 = '', v6 = '';
   if (st && typeof st === 'object') {
@@ -262,7 +273,8 @@ function ipCell(st){
   }
   function line(label, addr){
     if (!addr) return '<span class="ip-line">' + label + ' —</span>';
-    return '<span class="ip-line">' + label + ' ' + esc(addr)
+    const shown = (label === 'v6') ? shortV6(addr) : addr;
+    return '<span class="ip-line" title="' + esc(addr) + '">' + label + ' ' + esc(shown)
       + ' <button class="copybtn" data-ip="' + esc(addr) + '" onclick="copyIp(this)">复制</button></span>';
   }
   return line('v4', v4) + '<br>' + line('v6', v6);
@@ -306,7 +318,7 @@ async function loadHosts() {
   if (tags.includes(cur)) sel.value = cur; else sel.value = '';
   const want = sel.value;
   const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
-  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>位置</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
+  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>位置</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始/结束日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
   for (const h of rows) {
     const st = statsByName[h.name] || {};
     const flag = flagImg(st.country_code, h.location);
@@ -320,7 +332,7 @@ async function loadHosts() {
       + '<td class="nw">'+esc(h.name)+'</td><td class="nw">'+esc(h.tag || '默认')+'</td>'
       + '<td>'+ip+'</td><td class="nw">'+esc(ver)+'</td>'
       + '<td class="nw">'+limitCell(h.traffic_limit)+'</td><td class="nw">'+esc(h.traffic_mode)+'</td><td class="nw">'+h.monthstart+'</td>'
-      + '<td class="nw">'+esc(h.plan_start_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+fmtBw(h.bandwidth_mbps||0)+'</td>'
+      + '<td class="nw">'+esc(h.plan_start_date||'')+'<br>'+esc(h.plan_end_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+fmtBw(h.bandwidth_mbps||0)+'</td>'
       + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+' <button class="pen" title="修改公开备注" onclick="editPublicNote(\''+h.name+'\')">✎</button></td>'
       + '<td class="nw"><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
       + '<td class="nw"><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
@@ -497,7 +509,7 @@ function openHostForm(mode, name){
     set('f_name',''); set('f_pass',''); set('f_alias',''); set('f_tag','');
     set('f_location',''); set('f_type',''); set('f_weight','');
     set('f_limit','0'); $('f_mode').value='sum'; set('f_ms','1');
-    set('f_start',''); set('f_fee',''); set('f_bw',''); $('f_bw_unit').value = '1'; set('f_note',''); set('f_pnote','');
+    set('f_start',''); set('f_end',''); set('f_fee',''); set('f_bw',''); $('f_bw_unit').value = '1'; set('f_note',''); set('f_pnote','');
     $('f_cur').value = '$'; set('f_cur_custom',''); toggleCurCustom();
     $('f_name').readOnly = false; $('f_pass').placeholder = '客户端密码（必填）';
   } else {
@@ -506,7 +518,7 @@ function openHostForm(mode, name){
     set('f_name', h.name); set('f_pass',''); set('f_alias', h.alias); set('f_tag', h.tag||'');
     set('f_location', h.location); set('f_type', h.type); set('f_weight', h.weight);
     set('f_limit', Math.round(h.traffic_limit/GiB)); $('f_mode').value = h.traffic_mode; set('f_ms', h.monthstart);
-    set('f_start', h.plan_start_date||''); set('f_fee', h.annual_fee||0); setBwForm(h.bandwidth_mbps||0);
+    set('f_start', h.plan_start_date||''); set('f_end', h.plan_end_date||''); set('f_fee', h.annual_fee||0); setBwForm(h.bandwidth_mbps||0);
     const cur = (h.currency || '$').trim() || '$';
     if (['$','¥','£','€'].includes(cur)) { $('f_cur').value = cur; set('f_cur_custom',''); }
     else { $('f_cur').value = 'custom'; set('f_cur_custom', cur); }
@@ -524,7 +536,7 @@ async function saveHostForm(){
     if (editingName) {
       const body = {alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
+        plan_start_date:$('f_start').value, plan_end_date:$('f_end').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);
@@ -539,7 +551,7 @@ async function saveHostForm(){
       if (!pw) { showMsg('添加时密码不能为空', false); return; }
       const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
+        plan_start_date:$('f_start').value, plan_end_date:$('f_end').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);

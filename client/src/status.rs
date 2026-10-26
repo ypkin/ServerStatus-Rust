@@ -450,6 +450,19 @@ fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
                 (o.probe_uri.clone(), o.enabled)
             };
             if !enabled || uri.is_empty() {
+                // Fork (batch 3, probe consistency): an idle cell must
+                // report nothing, not the last measurement from before
+                // the server emptied/disabled this probe. Without this
+                // reset, a client that probed the CLI defaults for one
+                // sample before the first server push kept reporting
+                // that stale latency forever (loss stuck at 0, because
+                // fewer than 30 samples ever accumulated).
+                if let Ok(mut o) = ping_data.lock() {
+                    o.ping_time = 0;
+                    o.lost_rate = 0;
+                }
+                package_list.clear();
+                package_lost = 0;
                 thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
                 continue;
             }
@@ -541,11 +554,22 @@ pub fn apply_ping_config(
     let apply = |cell: &OnceCell<Arc<Mutex<PingData>>>, addr: &str| {
         if let Some(data) = cell.get() {
             if let Ok(mut o) = data.lock() {
+                // A changed target, a disabled probe, or an emptied
+                // address must not keep showing the previous target's
+                // numbers: reset so the next report reads 0 until fresh
+                // samples for the new target exist (the idle thread
+                // loop also zeroes, this makes the very next report
+                // correct even before that loop runs).
+                let changed = o.probe_uri != addr;
                 o.enabled = enabled;
                 if enabled {
                     // Authoritative overwrite: empty idles the cell,
                     // non-empty points it at the new address.
                     o.probe_uri = addr.to_string();
+                }
+                if !enabled || addr.is_empty() || changed {
+                    o.ping_time = 0;
+                    o.lost_rate = 0;
                 }
             }
         }

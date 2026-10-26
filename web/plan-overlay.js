@@ -4,9 +4,12 @@
 // The React table renders one row per server; the first cell holds the
 // display name (alias, falling back to the node name) inside a truncated
 // div. By default a row shows only its React summary. Clicking the name
-// cell expands a nezha-style detail block under the name (plan, system,
-// CPU, disk, memory, swap, traffic, load, processes, connections, boot
-// time, uptime, probes, public note); clicking again collapses it.
+// cell expands a full-width detail row under it (plan, system, CPU
+// model, traffic, boot time, online duration, last activity, version,
+// public note — only what React's own expanded row does not already
+// show); clicking again collapses it. The 节点/协议 columns are swapped
+// (protocol first) and the Tag pill bar sits in the page header next
+// to the ServerStatus title.
 // A nezha-style pill bar above the panel groups rows by Tag (empty Tag =
 // 默认组): dark rounded pills, white bold text, "name count"; clicking a
 // pill filters rows to that Tag, clicking it again (or 全部) clears.
@@ -37,6 +40,38 @@
     return counts;
   }
 
+  // Batch 3: the pill bar lives in the page header, next to the
+  // ServerStatus title (h1.logo), not above the table. The title is
+  // shrunk so title + pills + theme toggle fit one row without
+  // overlapping; on narrow screens the header wraps. React only
+  // re-renders the header on a theme toggle, which would wipe a bar
+  // placed inside it — so placement is re-checked on every renderPills
+  // call, not just when the pill signature changes. Before React has
+  // rendered the header, the bar falls back to sitting before #root
+  // and is moved up on the next inject.
+  function placePills(bar) {
+    var h1 = document.querySelector('h1.logo');
+    if (h1 && h1.parentNode) {
+      h1.style.fontSize = '18px';
+      h1.style.whiteSpace = 'nowrap';
+      var cont = h1.parentNode;
+      cont.style.flexWrap = 'wrap';
+      if (bar.parentNode !== cont || bar.previousSibling !== h1) {
+        cont.insertBefore(bar, h1.nextSibling);
+      }
+      bar.style.padding = '4px 8px';
+      bar.style.flex = '1 1 auto';
+      bar.style.justifyContent = 'flex-start';
+      return;
+    }
+    var root = document.getElementById('root');
+    if (root && root.parentNode && bar.parentNode !== root.parentNode) {
+      root.parentNode.insertBefore(bar, root);
+    }
+    bar.style.padding = '12px 16px';
+    bar.style.flex = '';
+  }
+
   function renderPills() {
     if (!haveStats) return;
     var counts = pillsData();
@@ -51,7 +86,10 @@
     tags.forEach(function (t) { sigParts.push(t + '=' + counts[t]); });
     var sig = sigParts.join('|');
     var bar = document.getElementById('ssr-tag-pills');
-    if (bar && bar.getAttribute('data-ssr-sig') === sig) return;
+    if (bar && bar.getAttribute('data-ssr-sig') === sig) {
+      placePills(bar);
+      return;
+    }
     if (!bar) {
       bar = document.createElement('div');
       bar.id = 'ssr-tag-pills';
@@ -81,6 +119,7 @@
     tags.forEach(function (t) {
       bar.appendChild(mk(tagDisplay(t) + ' ' + counts[t], t));
     });
+    placePills(bar);
   }
 
   function fmtGiB(bytes) {
@@ -134,6 +173,9 @@
   function planLine(s) {
     var parts = [];
     if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
+    // Batch 3: end date shows only when the user actually filled it.
+    // Nothing is ever derived from the fee or the start date.
+    if (s.plan_end_date) parts.push('结束 ' + s.plan_end_date);
     if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee, s.currency));
     if (s.bandwidth_mbps > 0) parts.push('带宽 ' + fmtBw(s.bandwidth_mbps));
     if (isUnlimitedTraffic(s.traffic_limit)) {
@@ -162,9 +204,16 @@
     return lines;
   }
 
+  // Boot time from the real seconds field (stats uptime_sec). The old
+  // code read stats "uptime", which is the formatted string ("N 天" /
+  // "HH:MM:SS") — multiplying a string gave NaN and the panel printed
+  // "NaN-NaN-NaN NaN:NaN". Any non-numeric, non-positive or
+  // out-of-range value hides the row instead of printing NaN.
   function bootLine(uptimeSec) {
-    if (!uptimeSec || uptimeSec <= 0) return '';
-    var d = new Date(Date.now() - uptimeSec * 1000);
+    var sec = Number(uptimeSec);
+    if (!isFinite(sec) || sec <= 0) return '';
+    var d = new Date(Date.now() - sec * 1000);
+    if (isNaN(d.getTime())) return '';
     var p = function (n) { return (n < 10 ? '0' : '') + n; };
     return '启动时间：' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
       + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
@@ -182,19 +231,15 @@
     if (si.os_arch) sysParts.push(si.os_arch);
     if (s.host_type) sysParts.push(s.host_type);
     if (sysParts.length) lines.push('系统：' + sysParts.join(' · '));
+    // Batch 3 (cdt detail fix): the overlay detail keeps ONLY what
+    // React does not already show — plan, system, CPU model, traffic,
+    // boot, online duration, last activity, version, public note.
+    // Load, memory, disk, swap, process/connection counts and probe
+    // latency already live in React's own expanded row below, so
+    // repeating them here stacked two identical sections together.
     if (si.cpu_brand || si.cpu_num) {
       var cpu = (si.cpu_brand || '') + (si.cpu_num ? ' × ' + si.cpu_num : '');
-      if (typeof s.cpu === 'number') cpu += ' · 占用 ' + (Math.round(s.cpu * 10) / 10) + '%';
       lines.push('CPU：' + cpu);
-    }
-    if (s.hdd_total > 0) {
-      lines.push('硬盘：' + fmtGiBFromMB(s.hdd_used) + ' / ' + fmtGiBFromMB(s.hdd_total) + pct(s.hdd_used, s.hdd_total));
-    }
-    if (s.memory_total > 0) {
-      lines.push('内存：' + fmtGiBFromKiB(s.memory_used) + ' / ' + fmtGiBFromKiB(s.memory_total) + pct(s.memory_used, s.memory_total));
-    }
-    if (s.swap_total > 0) {
-      lines.push('交换：' + fmtGiBFromKiB(s.swap_used) + ' / ' + fmtGiBFromKiB(s.swap_total) + pct(s.swap_used, s.swap_total));
     }
     var tParts = [];
     if (s.month_rx + s.month_tx > 0) {
@@ -205,23 +250,50 @@
     tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
     tParts.push(isUnlimitedTraffic(s.traffic_limit) ? '限额不限量' : '限额 ' + fmtGiB(s.traffic_limit));
     lines.push('流量：' + tParts.join(' · '));
-    lines.push('负载：' + s.load_1 + ' / ' + s.load_5 + ' / ' + s.load_15);
-    lines.push('进程：' + s.process_count);
-    lines.push('连接：TCP ' + s.tcp_count + ' / UDP ' + s.udp_count);
-    var boot = bootLine(s.uptime);
+    var boot = bootLine(s.uptime_sec);
     if (boot) lines.push(boot);
-    if (s.uptime_str) lines.push('在线时长：' + s.uptime_str);
+    if (s.uptime_display) lines.push('在线时长：' + s.uptime_display);
     lines.push('最后活动：' + fmtDate(s.latest_ts));
     if (s.version) lines.push('版本号：' + s.version);
-    probeLines(s).forEach(function (l) { lines.push(l); });
     if (s.public_note) lines.push('公开备注：' + s.public_note);
     return lines;
+  }
+
+  // Batch 3: swap the main panel's 节点 (name) and 协议 (IPv4/IPv6
+  // badges) columns — protocol first, node second, everything else in
+  // place, contents untouched. The React bundle is precompiled, so the
+  // swap is a DOM reorder re-applied on every inject (React wipes
+  // foreign DOM on refresh). Idempotent: a row whose first cell is
+  // already the protocol cell (no alias div.truncate inside) is left
+  // alone, and the header is swapped only while it still reads 节点/协议.
+  function swapColumns() {
+    var table = document.getElementById('ssr-table');
+    if (!table) return;
+    var head = table.querySelector('thead tr');
+    if (head) {
+      var ths = head.querySelectorAll('th');
+      if (ths.length >= 2 && (ths[0].textContent || '').trim() === '节点'
+          && (ths[1].textContent || '').trim() === '协议') {
+        head.insertBefore(ths[1], ths[0]);
+      }
+    }
+    var rows = table.querySelectorAll('tbody tr');
+    rows.forEach(function (tr) {
+      if (tr.getAttribute && tr.getAttribute('data-ssr-detail-row')) return;
+      var tds = tr.querySelectorAll('td');
+      if (tds.length < 2) return; // React's own expand row: single colspan td
+      var first = tds[0];
+      if (first.querySelector && first.querySelector('div.truncate')) {
+        tr.insertBefore(tds[1], first);
+      }
+    });
   }
 
   function inject() {
     var names = Object.keys(planByName);
     if (!names.length) return;
     renderPills();
+    swapColumns();
     // Anchor: the alias cell div (class "truncate" inside a td).
     var cells = document.querySelectorAll('td div.truncate');
     var handled = new Set();
@@ -253,8 +325,9 @@
       // Tag filter: hide rows outside the active pill's Tag. Unmapped
       // rows (name not found in stats) always stay visible.
       var tr = td.closest('tr');
+      var wantDisp = '';
       if (tr) {
-        var wantDisp = (activeTag !== null && (srv.tag || '') !== activeTag) ? 'none' : '';
+        wantDisp = (activeTag !== null && (srv.tag || '') !== activeTag) ? 'none' : '';
         if (tr.style.display !== wantDisp) tr.style.display = wantDisp;
       }
       // Main-panel location column: replace the place-name text with a
@@ -285,26 +358,54 @@
           }
         }
       }
-      // Detail block: present iff expanded, rebuilt only when changed.
-      var block = td.querySelector('[data-ssr-detail]');
+      // Detail block (batch 3, cdt fix): a full-width row of its own
+      // (tr[data-ssr-detail-row] + td colspan = the row's cell count),
+      // inserted right after the main row — never crammed into the
+      // first (now second, after the column swap) narrow name cell,
+      // which is what squeezed every line into a vertical stack with
+      // the rest of the row empty. Lines are plain divs (no
+      // div.truncate class) so the name-cell loop above never mistakes
+      // them for node rows. Present iff expanded, rebuilt only when
+      // its key changes; a legacy in-cell block from an older overlay
+      // version is removed so the two never stack.
+      var legacy = td.querySelector('[data-ssr-detail]');
+      if (legacy) legacy.remove();
+      var detailRow = null;
+      if (tr && tr.nextElementSibling && tr.nextElementSibling.getAttribute
+          && tr.nextElementSibling.getAttribute('data-ssr-detail-row') === srv.name) {
+        detailRow = tr.nextElementSibling;
+      }
       if (!expanded[srv.name]) {
-        if (block) block.remove();
+        if (detailRow && detailRow.parentNode) detailRow.parentNode.removeChild(detailRow);
         return;
       }
+      if (!tr || !tr.parentNode) return;
       var wanted = detailLines(srv);
       var key = wanted.join('\n');
-      if (block && block.getAttribute('data-ssr-key') === key) return;
-      if (block) block.remove();
-      block = document.createElement('div');
-      block.setAttribute('data-ssr-detail', '1');
-      block.setAttribute('data-ssr-key', key);
+      if (detailRow) {
+        if (detailRow.getAttribute('data-ssr-key') === key) {
+          if (detailRow.style.display !== wantDisp) detailRow.style.display = wantDisp;
+          return;
+        }
+        detailRow.parentNode.removeChild(detailRow);
+        detailRow = null;
+      }
+      detailRow = document.createElement('tr');
+      detailRow.setAttribute('data-ssr-detail-row', srv.name);
+      detailRow.setAttribute('data-ssr-key', key);
+      detailRow.style.display = wantDisp;
+      var dtd = document.createElement('td');
+      var colCount = tr.querySelectorAll('td').length || 16;
+      dtd.setAttribute('colspan', String(colCount));
+      dtd.style.cssText = 'padding:6px 12px;background:#f9fafb;text-align:left';
       wanted.forEach(function (text) {
         var line = document.createElement('div');
         line.style.cssText = 'font-size:11px;line-height:1.5;color:#6b7280;white-space:normal;word-break:break-word;margin-top:2px';
         line.textContent = text;
-        block.appendChild(line);
+        dtd.appendChild(line);
       });
-      td.appendChild(block);
+      detailRow.appendChild(dtd);
+      tr.parentNode.insertBefore(detailRow, tr.nextSibling);
     });
   }
 
@@ -339,6 +440,7 @@
             location: s.location || '',
             country_code: s.country_code || '',
             plan_start_date: s.plan_start_date || '',
+            plan_end_date: s.plan_end_date || '',
             annual_fee: s.annual_fee || 0,
             currency: s.currency || '$',
             bandwidth_mbps: s.bandwidth_mbps || 0,
@@ -366,8 +468,11 @@
             process_count: s.process_count || 0,
             tcp_count: s.tcp_count || 0,
             udp_count: s.udp_count || 0,
-            uptime: s.uptime || 0,
-            uptime_str: s.uptime_str || '',
+            // uptime_sec = raw seconds (boot time); uptime_display =
+            // the formatted string ("N 天" / "HH:MM:SS", the stats
+            // "uptime" key). Never feed the string into bootLine.
+            uptime_sec: s.uptime_sec || 0,
+            uptime_display: s.uptime || '',
             public_note: s.public_note || '',
             sys_info: s.sys_info || null,
             ping_probes: s.ping_probes || [],

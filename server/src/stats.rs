@@ -218,6 +218,7 @@ impl StatsMgr {
                         // members inherit the template), so copy it onto
                         // the outgoing stat for stats.json.
                         stat_t.plan_start_date = info.plan_start_date.clone();
+                        stat_t.plan_end_date = info.plan_end_date.clone();
                         stat_t.annual_fee = info.annual_fee;
                         stat_t.currency = if info.currency.is_empty() {
                             "$".to_string()
@@ -321,6 +322,10 @@ impl StatsMgr {
                             0
                         };
 
+                        // Fork: keep the raw seconds alongside the
+                        // formatted string (see payload uptime_sec), so
+                        // the overlay can compute a real boot time.
+                        stat_t.uptime_sec = stat_t.uptime;
                         // uptime str
                         let day = stat_t.uptime / (3600 * 24);
                         if day > 0 {
@@ -546,6 +551,15 @@ impl StatsMgr {
                     srv.insert("ip_info".into(), serde_json::to_value(stat.ip_info.as_ref())?);
                     srv.insert("sys_info".into(), serde_json::to_value(stat.sys_info.as_ref())?);
                     srv.insert("ping_probes".into(), ping_probes_json(&ping, stat));
+                    // Fork (batch 3, probe consistency): the precompiled
+                    // React panel reads the legacy time_*/ping_* fields
+                    // directly, so a stale value there contradicts an
+                    // empty probe config. Zero every stack the user has
+                    // not actually configured (or all stacks when probing
+                    // is disabled) in this enriched view only — the
+                    // stored HostStat is untouched, and a configured
+                    // stack keeps its live measurement.
+                    zero_unconfigured_probe_fields(srv, &ping);
                     // Fork: the proto IpInfo carries a country *name* only,
                     // so derive the 2-letter code here for the admin flag
                     // columns. Unknown names yield "" (text only, never a
@@ -799,6 +813,37 @@ pub fn country_code_for_country(name: &str) -> &'static str {
     }
 }
 
+/// Zero the legacy probe fields of every stack the user has not
+/// configured (see the get_all_info call site). `ping` is the normalized
+/// effective config, so cu_addr already equals the effective v4 address.
+fn zero_unconfigured_probe_fields(
+    srv: &mut serde_json::Map<String, serde_json::Value>,
+    ping: &crate::config::PingConfig,
+) {
+    let mut zero = |time_key: &str, loss_key: &str| {
+        srv.insert(time_key.to_string(), serde_json::json!(0.0));
+        srv.insert(loss_key.to_string(), serde_json::json!(0.0));
+    };
+    if !ping.enabled || ping.cu_addr.is_empty() {
+        zero("time_10010", "ping_10010");
+    }
+    if !ping.enabled || ping.ct_addr.is_empty() {
+        zero("time_189", "ping_189");
+    }
+    if !ping.enabled || ping.cm_addr.is_empty() {
+        zero("time_10086", "ping_10086");
+    }
+    if !ping.enabled || ping.cu_addr_v6.is_empty() {
+        zero("time_10010_v6", "ping_10010_v6");
+    }
+    if !ping.enabled || ping.ct_addr_v6.is_empty() {
+        zero("time_189_v6", "ping_189_v6");
+    }
+    if !ping.enabled || ping.cm_addr_v6.is_empty() {
+        zero("time_10086_v6", "ping_10086_v6");
+    }
+}
+
 /// Probe latency rows for one server in stats.json (see plan-overlay.js).
 /// Only probes/stacks the user actually configured are included; when
 /// probing is disabled the list is empty. The legacy time_*/ping_* fields
@@ -880,5 +925,36 @@ mod country_tests {
     fn unknown_country_yields_empty_not_a_guess() {
         assert_eq!(country_code_for_country(""), "");
         assert_eq!(country_code_for_country("Somewhere New"), "");
+    }
+
+    #[test]
+    fn unconfigured_probe_stacks_zero_out_legacy_fields() {
+        // Batch 3 probe consistency: only the configured stack keeps its
+        // live numbers; every unconfigured stack (and every stack when
+        // probing is disabled) must read 0, never a stale measurement
+        // from before the config was emptied.
+        let mut srv = serde_json::json!({
+            "time_10010": 42.0, "ping_10010": 0.0,
+            "time_189": 39.0, "ping_189": 0.0,
+            "time_10086": 344.0, "ping_10086": 0.0,
+            "time_10010_v6": 55.0, "ping_10010_v6": 0.0,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut ping = crate::config::PingConfig::default();
+        ping.enabled = true;
+        ping.cu_addr = "1.1.1.1:80".to_string();
+        ping.ct_addr = String::new();
+        ping.cm_addr = String::new();
+        ping.cu_addr_v6 = String::new();
+        zero_unconfigured_probe_fields(&mut srv, &ping);
+        assert_eq!(srv["time_10010"], 42.0);
+        assert_eq!(srv["time_189"], 0.0);
+        assert_eq!(srv["time_10086"], 0.0);
+        assert_eq!(srv["time_10010_v6"], 0.0);
+        ping.enabled = false;
+        zero_unconfigured_probe_fields(&mut srv, &ping);
+        assert_eq!(srv["time_10010"], 0.0);
     }
 }

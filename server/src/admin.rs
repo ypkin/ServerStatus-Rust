@@ -305,7 +305,8 @@ pub async fn get_hosts(_claims: jwt::Claims) -> impl IntoResponse {
             "type": host_type, "notify": h.notify, "disabled": h.disabled,
             "labels": h.labels, "gid": h.gid, "source": source,
             "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
-            "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
+            "plan_start_date": h.plan_start_date, "plan_end_date": h.plan_end_date,
+            "annual_fee": h.annual_fee,
             "currency": crate::config::normalize_currency(&h.currency),
             "bandwidth_mbps": h.bandwidth_mbps,
             "tag": h.tag, "note": h.note, "public_note": h.public_note,
@@ -516,7 +517,8 @@ fn host_json(h: &Host) -> Value {
         "type": h.r#type, "gid": h.gid, "notify": h.notify,
         "disabled": h.disabled, "labels": h.labels,
         "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
-        "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
+        "plan_start_date": h.plan_start_date, "plan_end_date": h.plan_end_date,
+        "annual_fee": h.annual_fee,
         "currency": crate::config::normalize_currency(&h.currency),
         "bandwidth_mbps": h.bandwidth_mbps,
         "tag": h.tag, "note": h.note, "public_note": h.public_note,
@@ -550,6 +552,8 @@ pub struct HostCreateBody {
     pub disabled: Option<bool>,
     #[serde(default)]
     pub plan_start_date: String,
+    #[serde(default)]
+    pub plan_end_date: String,
     #[serde(default)]
     pub annual_fee: Option<f64>,
     #[serde(default)]
@@ -588,6 +592,9 @@ pub async fn post_host(
     if !valid_plan_date(&body.plan_start_date) {
         return err(StatusCode::BAD_REQUEST, "plan_start_date must be YYYY-MM-DD");
     }
+    if !valid_plan_date(&body.plan_end_date) {
+        return err(StatusCode::BAD_REQUEST, "plan_end_date must be YYYY-MM-DD");
+    }
     if body.annual_fee.map(|f| f < 0.0 || !f.is_finite()).unwrap_or(false) {
         return err(StatusCode::BAD_REQUEST, "annual_fee must be >= 0");
     }
@@ -611,6 +618,7 @@ pub async fn post_host(
             traffic_limit: body.traffic_limit.unwrap_or(0),
             traffic_mode: normalize_traffic_mode(body.traffic_mode.as_deref().unwrap_or("sum")),
             plan_start_date: body.plan_start_date.clone(),
+            plan_end_date: body.plan_end_date.clone(),
             annual_fee: body.annual_fee.unwrap_or(0.0),
             currency: body
                 .currency
@@ -669,6 +677,8 @@ pub struct HostUpdateBody {
     #[serde(default)]
     pub plan_start_date: Option<String>,
     #[serde(default)]
+    pub plan_end_date: Option<String>,
+    #[serde(default)]
     pub annual_fee: Option<f64>,
     #[serde(default)]
     pub currency: Option<String>,
@@ -704,6 +714,11 @@ pub async fn put_host(
             return err(StatusCode::BAD_REQUEST, "plan_start_date must be YYYY-MM-DD");
         }
     }
+    if let Some(d) = body.plan_end_date.as_ref() {
+        if !valid_plan_date(d) {
+            return err(StatusCode::BAD_REQUEST, "plan_end_date must be YYYY-MM-DD");
+        }
+    }
     if body.annual_fee.map(|f| f < 0.0 || !f.is_finite()).unwrap_or(false) {
         return err(StatusCode::BAD_REQUEST, "annual_fee must be >= 0");
     }
@@ -728,6 +743,7 @@ pub async fn put_host(
         if let Some(v) = body.labels { h.labels = v; }
         if let Some(v) = body.disabled { h.disabled = v; }
         if let Some(v) = body.plan_start_date { h.plan_start_date = v; }
+        if let Some(v) = body.plan_end_date { h.plan_end_date = v; }
         if let Some(v) = body.annual_fee { h.annual_fee = v; }
         if let Some(v) = body.currency { h.currency = crate::config::normalize_currency(&v); }
         if let Some(v) = body.bandwidth_mbps { h.bandwidth_mbps = v; }

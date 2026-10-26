@@ -282,6 +282,11 @@ pub struct Host {
     /// Plan start date, YYYY-MM-DD, empty = unset (fork, backend-managed).
     #[serde(default = "Default::default")]
     pub plan_start_date: String,
+    /// Plan end date, YYYY-MM-DD, empty = unset (fork, batch 3). It is
+    /// only ever what the user typed in the admin form: never derived
+    /// from the annual fee or the start date, never fabricated.
+    #[serde(default = "Default::default")]
+    pub plan_end_date: String,
     /// Annual fee in the panel's currency (e.g. USD), 0 = unset (fork).
     #[serde(default = "Default::default")]
     pub annual_fee: f64,

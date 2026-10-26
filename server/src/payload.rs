@@ -32,6 +32,14 @@ pub struct HostStat {
     pub uptime: u64,
     #[serde(rename(serialize = "uptime"), skip_deserializing)]
     pub uptime_str: String,
+    // Fork (batch 3, cdt detail fix): the real uptime in seconds, kept as
+    // its own key. The "uptime" JSON key above is the formatted string
+    // ("N 天" / "HH:MM:SS"), so an overlay that read it as seconds got
+    // NaN and printed "NaN-NaN-NaN NaN:NaN" for the boot time. Never
+    // derive a boot time from the formatted string; use this field, and
+    // hide the boot row when it is 0/missing.
+    #[serde(default)]
+    pub uptime_sec: u64,
 
     pub load_1: f64,
     pub load_5: f64,
@@ -126,6 +134,10 @@ pub struct HostStat {
     // fabricated (in particular no expiry date is derived here).
     #[serde(default)]
     pub plan_start_date: String,
+    /// End date, copied from the Host record like the start date (see
+    /// stats.rs). Empty = unset; never derived, never fabricated.
+    #[serde(default)]
+    pub plan_end_date: String,
     #[serde(default)]
     pub annual_fee: f64,
     /// Currency symbol for annual_fee, copied from the Host record
