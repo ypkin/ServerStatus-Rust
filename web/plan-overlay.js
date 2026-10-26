@@ -3,13 +3,19 @@
 //
 // The React table renders one row per server; the first cell holds the
 // display name (alias, falling back to the node name) inside a truncated
-// div. By default a row shows only its React summary. Clicking the name
-// cell expands a full-width detail row under it (plan, system, CPU
-// model, traffic, boot time, online duration, last activity, version,
-// public note — only what React's own expanded row does not already
-// show); clicking again collapses it. The 节点/协议 columns are swapped
-// (protocol first) and the Tag pill bar sits in the page header next
-// to the ServerStatus title.
+// div. Clicking the name cell expands React's own detail row under it;
+// the overlay appends a tabbed detail block inside that wide row: a
+// node summary line, then 网络延迟 / 系统概览 tabs. The latency tab
+// carries the live probe lines plus a Prism-ported chart (1h/6h/24h/7d
+// ranges, 削峰/平滑 toggles, one line per user-named probe, v4/v6
+// split); the chart is sampled by the browser itself from the live
+// stats stream (one value per probe/stack per 30 s refresh), so
+// closing the browser restarts its history. The overview tab carries
+// only what React's own expanded row does not already show (plan,
+// system, CPU model, traffic, boot time, online duration, last
+// activity, version, public note); clicking again collapses it. The
+// 节点/协议 columns are swapped (protocol first) and the Tag pill bar
+// sits in the page header next to the ServerStatus title.
 // A nezha-style pill bar above the panel groups rows by Tag (empty Tag =
 // 默认组): dark rounded pills, white bold text, "name count"; clicking a
 // pill filters rows to that Tag, clicking it again (or 全部) clears.
@@ -259,6 +265,388 @@
     return lines;
   }
 
+  // --- Latency chart (batch 5, ported from Prism's detail drawer) ---
+  // Prism draws its latency chart from the panel's ping history; SSR has
+  // no server-side series, so the overlay samples the live stream itself
+  // (Prism's metrics-history approach: bucket live values, aggregate).
+  // Every stats refresh (30 s) appends one value per configured
+  // probe/stack into minute buckets; finalized minutes roll up into
+  // hourly buckets. Ranges 1h/6h/24h read minute buckets, 7d reads hourly
+  // buckets. History lives in memory only: closing the browser restarts
+  // it from scratch (the agreed behaviour, already told to the user).
+  // Nothing is fabricated: a timeout (the client caps at 1000 ms, so
+  // >= 1000 means the attempt timed out) is a null gap, and an
+  // unmeasured stack contributes no point at all. Tooltip shows raw
+  // bucket values, never the despiked/smoothed line (Prism's rule).
+  var latHist = {}; // name -> key -> {min:[[ts,val]...], hour:[[ts,val]...]}
+  var latPend = {}; // name -> key -> {min:{bucket,sum,n}, hour:{bucket,sum,n}}
+  var latLastSample = {}; // name -> ts
+  var detailState = {}; // name -> {tab, range, despike, smooth}
+
+  function detailStateFor(name) {
+    if (!detailState[name]) detailState[name] = { tab: 'latency', range: 24, despike: false, smooth: true };
+    return detailState[name];
+  }
+
+  function latVal(v) {
+    if (!v) return undefined; // unmeasured stack: no point, not a gap
+    if (v.time >= 1000 || v.loss >= 100) return null; // capped timeout
+    return v.time > 0 ? v.time : undefined;
+  }
+  function latPush(tier, bucket, val, cap) {
+    if (tier.length && tier[tier.length - 1][0] === bucket) { tier[tier.length - 1][1] = val; return; }
+    tier.push([bucket, val]);
+    while (tier.length > cap) tier.shift();
+  }
+  function latFinalizeMin(name, key, bucket, val) {
+    var h = latHist[name][key];
+    latPush(h.min, bucket, val, 1440);
+    var hb = Math.floor(bucket / 3600) * 3600;
+    var p = latPend[name][key].hour;
+    if (p.bucket !== hb) {
+      if (p.bucket !== 0) {
+        latPush(h.hour, p.bucket, p.n > 0 ? Math.round(p.sum / p.n) : null, 168);
+      }
+      p.bucket = hb; p.sum = 0; p.n = 0;
+    }
+    if (val !== null) { p.sum += val; p.n++; }
+  }
+  function sampleLatency(servers, nowSec) {
+    var minute = Math.floor(nowSec / 60) * 60;
+    servers.forEach(function (s) {
+      if (!latHist[s.name]) { latHist[s.name] = {}; latPend[s.name] = {}; }
+      (s.ping_probes || []).forEach(function (p) {
+        ['v4', 'v6'].forEach(function (stack) {
+          var val = latVal(p[stack]);
+          if (val === undefined) return;
+          var key = p.name + ' ' + stack;
+          if (!latHist[s.name][key]) {
+            latHist[s.name][key] = { min: [], hour: [] };
+            latPend[s.name][key] = { min: { bucket: 0, sum: 0, n: 0 }, hour: { bucket: 0, sum: 0, n: 0 } };
+          }
+          var pm = latPend[s.name][key].min;
+          if (pm.bucket !== minute) {
+            if (pm.bucket !== 0) {
+              latFinalizeMin(s.name, key, pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null);
+            }
+            pm.bucket = minute; pm.sum = 0; pm.n = 0;
+          }
+          if (val !== null) { pm.sum += val; pm.n++; }
+          latLastSample[s.name] = nowSec;
+        });
+      });
+    });
+  }
+  function latSeries(name, rangeHours) {
+    var now = Math.floor(Date.now() / 1000);
+    var from = now - rangeHours * 3600;
+    var hist = latHist[name] || {};
+    var out = [];
+    Object.keys(hist).forEach(function (key) {
+      var h = hist[key], pts;
+      if (rangeHours >= 168) {
+        pts = (h.hour || []).filter(function (p) { return p[0] >= from; });
+        var hb = Math.floor(now / 3600) * 3600;
+        var mins = (h.min || []).filter(function (p) { return p[0] >= hb && p[1] !== null; });
+        if (mins.length) {
+          var s = 0; mins.forEach(function (p) { s += p[1]; });
+          pts = pts.concat([[hb, Math.round(s / mins.length)]]);
+        }
+      } else {
+        pts = (h.min || []).filter(function (p) { return p[0] >= from; });
+        var pm = (latPend[name] && latPend[name][key]) ? latPend[name][key].min : null;
+        if (pm && pm.bucket >= from && pm.bucket > 0) {
+          pts = pts.concat([[pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null]]);
+        }
+      }
+      // Downsample to at most 360 points (Prism merges the same way).
+      if (pts.length > 360) {
+        var group = Math.ceil(pts.length / 360), merged = [];
+        for (var i = 0; i < pts.length; i += group) {
+          var slice = pts.slice(i, i + group), sum = 0, n = 0;
+          slice.forEach(function (p) { if (p[1] !== null) { sum += p[1]; n++; } });
+          merged.push([slice[0][0], n > 0 ? Math.round(sum / n) : null]);
+        }
+        pts = merged;
+      }
+      out.push({ key: key, points: pts });
+    });
+    return out;
+  }
+
+  // Prism's probe colours (v4/v6 of one carrier differ), fallback palette
+  // for user-named probes.
+  var LAT_COLORS = {
+    unicom: { v4: '#38BDF8', v6: '#C084FC' },
+    mobile: { v4: '#FA471E', v6: '#2BEA5E' },
+    telecom: { v4: '#FACC15', v6: '#F472B6' },
+  };
+  var LAT_FALLBACK = ['#38BDF8', '#FA471E', '#FACC15', '#2BEA5E', '#C084FC', '#F472B6'];
+  function latColor(key, idx) {
+    var low = key.toLowerCase();
+    var stack = low.indexOf(' v6') >= 0 ? 'v6' : 'v4';
+    if (low.indexOf('联通') >= 0 || low.indexOf('unicom') >= 0) return LAT_COLORS.unicom[stack];
+    if (low.indexOf('移动') >= 0 || low.indexOf('mobile') >= 0) return LAT_COLORS.mobile[stack];
+    if (low.indexOf('电信') >= 0 || low.indexOf('telecom') >= 0) return LAT_COLORS.telecom[stack];
+    return LAT_FALLBACK[idx % LAT_FALLBACK.length];
+  }
+
+  // Despike: port of Prism format.ts despike (window 7, 3 sigma MAD).
+  function latMedian(vals) {
+    var s = vals.slice().sort(function (a, b) { return a - b; });
+    var h = s.length >> 1;
+    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
+  }
+  function latDespike(values, window, sigmas) {
+    window = window || 7; sigmas = sigmas || 3;
+    var half = window >> 1;
+    return values.map(function (v, i) {
+      if (v === null) return v;
+      var near = values.slice(Math.max(0, i - half), i + half + 1).filter(function (n) { return n !== null; });
+      if (!near.length) return v;
+      var mid = latMedian(near);
+      var mad = Math.max(latMedian(near.map(function (n) { return Math.abs(n - mid); })), 1);
+      return Math.abs(v - mid) > sigmas * 1.4826 * mad ? mid : v;
+    });
+  }
+  // Smooth: port of Prism NodeDetail smoothPing (weighted neighbours,
+  // never across a null or an offline gap > 2.5x the bucket step).
+  function latMinStep(points) {
+    var step = Infinity;
+    for (var i = 1; i < points.length; i++) {
+      var gap = points[i][0] - points[i - 1][0];
+      if (gap > 0) step = Math.min(step, gap);
+    }
+    return step;
+  }
+  function latSmooth(points, values, radius) {
+    var step = latMinStep(points);
+    if (!isFinite(step)) return values;
+    return values.map(function (value, i) {
+      if (value === null) return null;
+      var sum = value * (radius + 1), weight = radius + 1;
+      [-1, 1].forEach(function (dir) {
+        var prev = i;
+        for (var off = 1; off <= radius; off++) {
+          var next = i + dir * off;
+          if (next < 0 || next >= values.length || values[next] === null ||
+              Math.abs(points[next][0] - points[prev][0]) > step * 2.5) break;
+          var part = radius + 1 - off;
+          sum += values[next] * part; weight += part; prev = next;
+        }
+      });
+      return sum / weight;
+    });
+  }
+
+  function latLine(text) {
+    var line = document.createElement('div');
+    line.style.cssText = 'font-size:11px;line-height:1.5;color:#6b7280;white-space:normal;word-break:break-word;margin-top:2px';
+    line.textContent = text;
+    return line;
+  }
+
+  function latChart(name, st) {
+    var wrap = document.createElement('div');
+    var series = latSeries(name, st.range);
+    var hasData = series.some(function (s) { return s.points.some(function (p) { return p[1] !== null; }); });
+    if (!hasData) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
+      empty.textContent = (series.length === 0)
+        ? '未设置探针：在后台探针页填入地址并保存后，页面打开时开始采样画线。'
+        : '已有探针，暂无采样：保持页面打开，约 30 秒后开始出线。';
+      wrap.appendChild(empty);
+      return wrap;
+    }
+    var radius = st.range <= 6 ? 2 : 1;
+    var drawn = series.map(function (s) {
+      var raw = s.points.map(function (p) { return p[1]; });
+      var vals = raw;
+      if (st.despike) vals = latDespike(vals);
+      if (st.smooth) vals = latSmooth(s.points, vals, radius);
+      return { key: s.key, points: s.points, raw: raw, vals: vals };
+    });
+    var ymax = 0;
+    drawn.forEach(function (s) { s.vals.forEach(function (v) { if (v !== null && v > ymax) ymax = v; }); });
+    ymax = Math.max(50, Math.ceil(ymax * 1.1));
+    var t0 = Infinity, t1 = 0;
+    drawn.forEach(function (s) { s.points.forEach(function (p) { if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0]; }); });
+    if (t1 <= t0) t1 = t0 + 60;
+    var W = 600, H = 180, PL = 44, PR = 8, PT = 8, PB = 20;
+    var X = function (ts) { return PL + (ts - t0) / (t1 - t0) * (W - PL - PR); };
+    var Y = function (v) { return PT + (1 - v / ymax) * (H - PT - PB); };
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px';
+    [0, 0.5, 1].forEach(function (f) {
+      var y = PT + (1 - f) * (H - PT - PB);
+      var ln = document.createElementNS(svgNS, 'line');
+      ln.setAttribute('x1', PL); ln.setAttribute('x2', W - PR);
+      ln.setAttribute('y1', y); ln.setAttribute('y2', y);
+      ln.setAttribute('stroke', '#e5e7eb'); ln.setAttribute('stroke-width', '1');
+      svg.appendChild(ln);
+      var tx = document.createElementNS(svgNS, 'text');
+      tx.setAttribute('x', PL - 4); tx.setAttribute('y', y + 4);
+      tx.setAttribute('text-anchor', 'end'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
+      tx.textContent = Math.round(ymax * f) + 'ms';
+      svg.appendChild(tx);
+    });
+    var fmtT = function (ts) {
+      var d = new Date(ts * 1000);
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      return st.range >= 168
+        ? (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()))
+        : (p(d.getHours()) + ':' + p(d.getMinutes()));
+    };
+    [t0, (t0 + t1) / 2, t1].forEach(function (ts) {
+      var tx = document.createElementNS(svgNS, 'text');
+      tx.setAttribute('x', X(ts)); tx.setAttribute('y', H - 6);
+      tx.setAttribute('text-anchor', 'middle'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
+      tx.textContent = fmtT(ts);
+      svg.appendChild(tx);
+    });
+    drawn.forEach(function (s, idx) {
+      var color = latColor(s.key, idx);
+      var step = latMinStep(s.points);
+      var seg = [];
+      var flush = function () {
+        if (seg.length > 1) {
+          var pl = document.createElementNS(svgNS, 'polyline');
+          pl.setAttribute('points', seg.join(' '));
+          pl.setAttribute('fill', 'none'); pl.setAttribute('stroke', color);
+          pl.setAttribute('stroke-width', '1.5'); pl.setAttribute('stroke-linejoin', 'round');
+          svg.appendChild(pl);
+        } else if (seg.length === 1) {
+          var c = document.createElementNS(svgNS, 'circle');
+          var xy = seg[0].split(',');
+          c.setAttribute('cx', xy[0]); c.setAttribute('cy', xy[1]); c.setAttribute('r', '2');
+          c.setAttribute('fill', color);
+          svg.appendChild(c);
+        }
+        seg = [];
+      };
+      s.points.forEach(function (p, i) {
+        var v = s.vals[i];
+        if (v === null) { flush(); return; }
+        if (seg.length && isFinite(step) && p[0] - s.points[i - 1][0] > step * 2.5) flush();
+        seg.push(X(p[0]).toFixed(1) + ',' + Y(v).toFixed(1));
+      });
+      flush();
+    });
+    var tip = document.createElement('div');
+    tip.style.cssText = 'font-size:11px;color:#374151;margin-top:4px;min-height:16px';
+    var hover = document.createElementNS(svgNS, 'rect');
+    hover.setAttribute('x', PL); hover.setAttribute('y', 0);
+    hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
+    hover.setAttribute('fill', 'transparent');
+    hover.addEventListener('mousemove', function (e) {
+      var rect = svg.getBoundingClientRect();
+      var px = (e.clientX - rect.left) / rect.width * W;
+      var ts = t0 + (px - PL) / (W - PL - PR) * (t1 - t0);
+      var parts = drawn.map(function (s) {
+        var best = -1, bd = Infinity;
+        s.points.forEach(function (p, i) {
+          var d = Math.abs(p[0] - ts);
+          if (d < bd) { bd = d; best = i; }
+        });
+        var v = best >= 0 ? s.raw[best] : null;
+        return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
+      });
+      var t = drawn[0].points.reduce(function (acc, p) {
+        return Math.abs(p[0] - ts) < Math.abs(acc - ts) ? p[0] : acc;
+      }, drawn[0].points[0][0]);
+      tip.textContent = fmtT(t) + ' · ' + parts.join(' · ');
+    });
+    hover.addEventListener('mouseleave', function () { tip.textContent = ''; });
+    svg.appendChild(hover);
+    var legend = document.createElement('div');
+    legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#374151;margin-top:4px';
+    drawn.forEach(function (s, idx) {
+      var last = null;
+      for (var i = s.raw.length - 1; i >= 0; i--) { if (s.raw[i] !== null) { last = s.raw[i]; break; } }
+      var item = document.createElement('span');
+      var dot = document.createElement('span');
+      dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;background:' + latColor(s.key, idx) + ';margin-right:3px';
+      item.appendChild(dot);
+      item.appendChild(document.createTextNode(s.key + (last !== null ? ' ' + last + 'ms' : ' —')));
+      legend.appendChild(item);
+    });
+    wrap.appendChild(legend);
+    wrap.appendChild(svg);
+    wrap.appendChild(tip);
+    return wrap;
+  }
+
+  function latControls(name, st) {
+    var bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px';
+    var mkBtn = function (label, active, fn) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'border:1px solid ' + (active ? '#f97316' : '#d1d5db') + ';background:' + (active ? '#f97316' : 'transparent') + ';color:' + (active ? '#fff' : '#374151') + ';border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer';
+      b.addEventListener('click', fn);
+      return b;
+    };
+    [[1, '1h'], [6, '6h'], [24, '24h'], [168, '7d']].forEach(function (r) {
+      bar.appendChild(mkBtn(r[1], st.range === r[0], function () { st.range = r[0]; inject(); }));
+    });
+    bar.appendChild(mkBtn('削峰', st.despike, function () { st.despike = !st.despike; inject(); }));
+    bar.appendChild(mkBtn('平滑', st.smooth, function () { st.smooth = !st.smooth; inject(); }));
+    return bar;
+  }
+
+  function summaryLine(s) {
+    var parts = [s.display];
+    parts.push((s.online4 || s.online6) ? '在线' : '离线');
+    if (s.location) parts.push(s.location);
+    parts.push('负载 ' + s.load_1 + ' / ' + s.load_5 + ' / ' + s.load_15);
+    if (typeof s.cpu === 'number') parts.push('CPU ' + (Math.round(s.cpu * 10) / 10) + '%');
+    if (s.memory_total > 0) parts.push('内存 ' + (Math.round(s.memory_used / s.memory_total * 1000) / 10) + '%');
+    return parts.join(' · ');
+  }
+
+  // Tabbed detail block (batch 5): summary row on top, then 网络延迟 /
+  // 系统概览 tabs. The latency tab carries the live probe lines, the
+  // range + 削峰/平滑 controls and the sampled chart; the overview tab
+  // carries detailLines (plan incl. end date, system, CPU, traffic,
+  // boot, online, activity, version, public note) — probe lines live
+  // only on the latency tab, so they are filtered out here defensively.
+  function renderDetailBlock(srv, block) {
+    var st = detailStateFor(srv.name);
+    var sum = document.createElement('div');
+    sum.style.cssText = 'font-size:12px;font-weight:600;color:#111827;margin-top:2px';
+    sum.textContent = summaryLine(srv);
+    block.appendChild(sum);
+    var tabs = document.createElement('div');
+    tabs.style.cssText = 'display:flex;gap:6px;margin-top:6px';
+    [['latency', '网络延迟'], ['overview', '系统概览']].forEach(function (t) {
+      var b = document.createElement('button');
+      b.textContent = t[1];
+      var active = st.tab === t[0];
+      b.style.cssText = 'border:1px solid ' + (active ? '#0a6cff' : '#d1d5db') + ';background:' + (active ? '#0a6cff' : 'transparent') + ';color:' + (active ? '#fff' : '#374151') + ';border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer';
+      b.addEventListener('click', function () { st.tab = t[0]; inject(); });
+      tabs.appendChild(b);
+    });
+    block.appendChild(tabs);
+    if (st.tab === 'latency') {
+      probeLines(srv).forEach(function (text) { block.appendChild(latLine(text)); });
+      block.appendChild(latControls(srv.name, st));
+      block.appendChild(latChart(srv.name, st));
+      var note = document.createElement('div');
+      note.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:4px';
+      note.textContent = '曲线为浏览器实时采样：页面打开期间每 30 秒采一次实时值；关闭浏览器后历史从头采。7d 为小时均值。';
+      block.appendChild(note);
+    } else {
+      var probes = probeLines(srv);
+      detailLines(srv).forEach(function (text) {
+        if (probes.indexOf(text) >= 0) return; // probe lines live on the latency tab
+        block.appendChild(latLine(text));
+      });
+    }
+  }
+
   // Batch 3: swap the main panel's 节点 (name) and 协议 (IPv4/IPv6
   // badges) columns — protocol first, node second, everything else in
   // place, contents untouched. The React bundle is precompiled, so the
@@ -364,22 +752,25 @@
           }
         }
       }
-      // Detail block (batch 4, relocation): the overlay lines live
+      // Detail block (batch 5, Prism port): the tabbed block lives
       // INSIDE React's own expanded row — the wide centered detail
       // block (load/memory/swap/disk/TCP/UDP/latency) — appended at
       // the end of its single colspan td. No table row or cell of
-      // our own anymore: batch 3's separate full-width row is gone,
-      // and nothing is ever crammed into the narrow name cell again.
+      // our own: batch 3's separate full-width row is gone, and
+      // nothing is ever crammed into the narrow name cell again.
       // React wipes foreign DOM on refresh, so the block is
       // re-attached on every inject (same pattern as the pills). If
       // React's row is not in the DOM yet (it renders just after the
-      // click), the next MutationObserver pass attaches it; nothing
-      // is rendered into a table cell in the meantime. Lines are
-      // plain divs (no div.truncate class) so the name-cell loop
-      // above never mistakes them for node rows. Present iff
-      // expanded, rebuilt only when its key changes; a legacy
-      // in-cell block from an older overlay version is removed so
-      // the two never stack.
+      // click), nothing is rendered anywhere; the next
+      // MutationObserver pass attaches it. Block content is plain
+      // divs/buttons/svg (no div.truncate class) so the name-cell
+      // loop above never mistakes them for node rows. Present iff
+      // expanded, rebuilt only when its key changes (stats lines +
+      // tab/range/toggle state + latest sample); tab state lives in
+      // detailState (overlay JS), not in the DOM, so a React wipe +
+      // re-attach keeps the tab the user picked. A legacy in-cell
+      // block from an older overlay version is removed so the two
+      // never stack.
       var legacy = td.querySelector('[data-ssr-detail]');
       if (legacy) legacy.remove();
       // React's own expand row: the row right after the main row,
@@ -401,8 +792,11 @@
         return;
       }
       if (!reactTd) return; // React has not rendered its row yet; retry next inject.
-      var wanted = detailLines(srv);
-      var key = wanted.join('\n');
+      var st = detailStateFor(srv.name);
+      var key = detailLines(srv).join('\n')
+        + '|tab=' + st.tab + '|range=' + st.range
+        + '|d=' + (st.despike ? 1 : 0) + '|s=' + (st.smooth ? 1 : 0)
+        + '|sample=' + (latLastSample[srv.name] || 0);
       var block = reactTd.querySelector('[data-ssr-detail]');
       if (block) {
         if (block.getAttribute('data-ssr-key') === key) return;
@@ -413,12 +807,7 @@
       block.setAttribute('data-ssr-detail', '1');
       block.setAttribute('data-ssr-key', key);
       block.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid #e5e7eb;text-align:left';
-      wanted.forEach(function (text) {
-        var line = document.createElement('div');
-        line.style.cssText = 'font-size:11px;line-height:1.5;color:#6b7280;white-space:normal;word-break:break-word;margin-top:2px';
-        line.textContent = text;
-        block.appendChild(line);
-      });
+      renderDetailBlock(srv, block);
       reactTd.appendChild(block);
     });
   }
@@ -494,6 +883,8 @@
         });
         planByName = map;
         haveStats = true;
+        // Batch 5: sample every node's probes for the latency chart.
+        sampleLatency(j.servers || [], Math.floor(Date.now() / 1000));
         renderPills();
         inject();
       })
