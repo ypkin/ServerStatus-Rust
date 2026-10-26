@@ -88,11 +88,38 @@ macro_rules! exec_shell_cmd_fetch_u32 {
     }};
 }
 
+/// Thread count from /proc, not `ps -eLf`: busybox ps (Alpine) has no
+/// -L flag, so that pipeline prints nothing, wc -l yields 0, and the
+/// old `0 - 2` wrapped to 4294967294 in release builds (seen live on
+/// the two Alpine nodes). /proc works identically on glibc and musl.
+fn count_threads_from_proc() -> u32 {
+    let mut total: u64 = 0;
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in procs.flatten() {
+        let name = entry.file_name();
+        let is_pid = name
+            .to_str()
+            .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or(false);
+        if !is_pid {
+            continue;
+        }
+        if let Ok(tasks) = std::fs::read_dir(entry.path().join("task")) {
+            total += tasks.count() as u64;
+        }
+    }
+    total.min(u32::MAX as u64) as u32
+}
+
 pub fn tupd() -> (u32, u32, u32, u32) {
-    let t = exec_shell_cmd_fetch_u32!("ss -t | wc -l") - 1;
-    let u = exec_shell_cmd_fetch_u32!("ss -u | wc -l") - 1;
-    let p = exec_shell_cmd_fetch_u32!("ps -ef | wc -l") - 2;
-    let d = exec_shell_cmd_fetch_u32!("ps -eLf | wc -l") - 2;
+    // saturating_sub: a missing tool (or empty output) must report 0,
+    // never wrap into a bogus near-2^32 count.
+    let t = exec_shell_cmd_fetch_u32!("ss -t | wc -l").saturating_sub(1);
+    let u = exec_shell_cmd_fetch_u32!("ss -u | wc -l").saturating_sub(1);
+    let p = exec_shell_cmd_fetch_u32!("ps -ef | wc -l").saturating_sub(2);
+    let d = count_threads_from_proc();
 
     (t, u, p, d)
 }

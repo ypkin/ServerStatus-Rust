@@ -197,6 +197,38 @@ mod ping_tests {
         assert_eq!(n.cu_addr_v4, "10.0.0.1:80");
         assert_eq!(n.cu_addr_v6, "2001:db8::1:80");
     }
+
+    #[test]
+    fn custom_probe_names_survive_round_trip() {
+        // Rename path (batch-3 check): a user-edited probe name must
+        // survive deserialize + normalized() and reach ping_probes_json.
+        // Only an *empty* name falls back to the default.
+        let p: PingConfig = serde_json::from_str(
+            r#"{"enabled":true,"cu_name":"自家探针","ct_name":"","cm_name":"移动"}"#,
+        )
+        .unwrap();
+        let n = p.normalized();
+        assert_eq!(n.cu_name, "自家探针");
+        assert_eq!(n.ct_name, "电信");
+        assert_eq!(n.cm_name, "移动");
+    }
+
+    #[test]
+    fn currency_normalization() {
+        assert_eq!(normalize_currency(""), "$");
+        assert_eq!(normalize_currency("  ¥  "), "¥");
+        assert_eq!(normalize_currency("HK$"), "HK$");
+        // Long pasted text is capped, never stored verbatim.
+        assert_eq!(normalize_currency("0123456789ABCDEF").len(), 8);
+    }
+
+    #[test]
+    fn host_without_currency_defaults_to_dollar() {
+        // Old admin.json records predate the field: value and meaning
+        // both stay "$" (existing fees are not re-denominated).
+        let h: Host = serde_json::from_str(r#"{"name":"x","password":"p"}"#).unwrap();
+        assert_eq!(h.currency, "$");
+    }
 }
 
 pub fn normalize_traffic_mode(mode: &str) -> String {
@@ -204,6 +236,21 @@ pub fn normalize_traffic_mode(mode: &str) -> String {
         "up" | "down" | "max" => mode.to_string(),
         _ => "sum".to_string(),
     }
+}
+
+/// Annual fee currency symbol (fork, per-host). "$" when unset; a custom
+/// symbol is stored verbatim (trimmed, capped at 8 chars so a pasted
+/// sentence cannot blow up the table cell).
+pub fn normalize_currency(s: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return "$".to_string();
+    }
+    t.chars().take(8).collect()
+}
+
+fn default_currency() -> String {
+    "$".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -236,6 +283,11 @@ pub struct Host {
     /// Annual fee in the panel's currency (e.g. USD), 0 = unset (fork).
     #[serde(default = "Default::default")]
     pub annual_fee: f64,
+    /// Currency symbol for annual_fee (fork, per-host). Records written
+    /// before this field existed deserialize to "$", so existing fees
+    /// keep their value and their dollar meaning.
+    #[serde(default = "default_currency")]
+    pub currency: String,
     /// Advertised bandwidth in Mbps, 0 = unset (fork).
     #[serde(default = "Default::default")]
     pub bandwidth_mbps: u32,

@@ -256,7 +256,18 @@ pub async fn get_hosts(_claims: jwt::Claims) -> impl IntoResponse {
     let list: Vec<Host> = {
         let hosts = crate::registry::HOSTS_MAP.lock().unwrap();
         let mut list: Vec<Host> = hosts.values().cloned().collect();
-        list.sort_by_key(|h| h.pos);
+        // Same order as the main panel (stats.rs sorts servers by weight
+        // desc, pos asc, alias asc): the admin table, drag-sort and the
+        // panel must never disagree about which node is "first".
+        list.sort_by(|a, b| {
+            if a.weight != b.weight {
+                return b.weight.cmp(&a.weight);
+            }
+            if a.pos != b.pos {
+                return a.pos.cmp(&b.pos);
+            }
+            a.alias.cmp(&b.alias)
+        });
         list
     };
     // Live location/type from the latest report (already resolved with
@@ -295,6 +306,7 @@ pub async fn get_hosts(_claims: jwt::Claims) -> impl IntoResponse {
             "labels": h.labels, "gid": h.gid, "source": source,
             "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
             "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
+            "currency": crate::config::normalize_currency(&h.currency),
             "bandwidth_mbps": h.bandwidth_mbps,
             "tag": h.tag, "note": h.note, "public_note": h.public_note,
             "weight": h.weight,
@@ -505,6 +517,7 @@ fn host_json(h: &Host) -> Value {
         "disabled": h.disabled, "labels": h.labels,
         "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
         "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
+        "currency": crate::config::normalize_currency(&h.currency),
         "bandwidth_mbps": h.bandwidth_mbps,
         "tag": h.tag, "note": h.note, "public_note": h.public_note,
         "weight": h.weight,
@@ -539,6 +552,8 @@ pub struct HostCreateBody {
     pub plan_start_date: String,
     #[serde(default)]
     pub annual_fee: Option<f64>,
+    #[serde(default)]
+    pub currency: Option<String>,
     #[serde(default)]
     pub bandwidth_mbps: Option<u32>,
     #[serde(default)]
@@ -597,6 +612,11 @@ pub async fn post_host(
             traffic_mode: normalize_traffic_mode(body.traffic_mode.as_deref().unwrap_or("sum")),
             plan_start_date: body.plan_start_date.clone(),
             annual_fee: body.annual_fee.unwrap_or(0.0),
+            currency: body
+                .currency
+                .as_deref()
+                .map(crate::config::normalize_currency)
+                .unwrap_or_else(|| "$".to_string()),
             bandwidth_mbps: body.bandwidth_mbps.unwrap_or(0),
             tag: body.tag.clone(),
             note: body.note.clone(),
@@ -650,6 +670,8 @@ pub struct HostUpdateBody {
     pub plan_start_date: Option<String>,
     #[serde(default)]
     pub annual_fee: Option<f64>,
+    #[serde(default)]
+    pub currency: Option<String>,
     #[serde(default)]
     pub bandwidth_mbps: Option<u32>,
     #[serde(default)]
@@ -707,6 +729,7 @@ pub async fn put_host(
         if let Some(v) = body.disabled { h.disabled = v; }
         if let Some(v) = body.plan_start_date { h.plan_start_date = v; }
         if let Some(v) = body.annual_fee { h.annual_fee = v; }
+        if let Some(v) = body.currency { h.currency = crate::config::normalize_currency(&v); }
         if let Some(v) = body.bandwidth_mbps { h.bandwidth_mbps = v; }
         if let Some(v) = body.tag { h.tag = v; }
         if let Some(v) = body.note { h.note = v; }

@@ -8,7 +8,22 @@
 body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:1280px;margin:0 auto;padding:16px;background:#f6f7f9;color:#222}
 h1{font-size:20px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}
 table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
-th,td{border:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top;word-break:break-all}
+th,td{border:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top}
+/* Node table readability (batch 3): the old global word-break:break-all
+   snapped names and addresses mid-word (56idc-hk -> 56id / c-hk).
+   Headers never wrap; key columns never break words; the table scrolls
+   horizontally instead of being squeezed into one screen. Note/remark
+   columns keep normal wrapping (breaks at spaces, never mid-word). */
+#hosts table{width:max-content;min-width:100%}
+#hosts th{white-space:nowrap}
+#hosts td.nw{white-space:nowrap}
+#hosts td.loc{white-space:nowrap}
+.ip-line{white-space:nowrap}
+.copybtn{padding:1px 6px;font-size:12px;margin-left:4px}
+.drag-handle{cursor:grab;user-select:none;white-space:nowrap}
+tr.dragging{opacity:.45}
+tr.drop-before{box-shadow:inset 0 2px 0 #0a6cff}
+tr.drop-after{box-shadow:inset 0 -2px 0 #0a6cff}
 input,select{padding:5px 7px;font-size:13px;margin:2px}
 button{padding:5px 12px;font-size:13px;cursor:pointer}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all;background:#f0f0f0;padding:8px}
@@ -54,6 +69,8 @@ label{display:inline-block;min-width:96px}
       <button onclick="openHostForm('add')">添加节点</button>
       <button onclick="batchDelHosts()">批量删除</button>
       <button onclick="batchSetTag()">批量修改分组</button>
+      <button id="saveOrderBtn" onclick="saveOrder()" disabled>保存排序</button>
+      <span id="orderHint" class="hint">拖动 ☰ 换位后点保存排序才生效；筛选状态下不能排序，请先切回全部。</span>
       <span class="hint">分组即 nezha 的 Tag：每台节点自由填写，前台按 Tag 分组，空 Tag 归默认组。</span>
     </div>
     <div style="overflow-x:auto"><div id="hosts"></div></div>
@@ -68,7 +85,7 @@ label{display:inline-block;min-width:96px}
       <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量">
       <label>计费模式</label><select id="f_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
       <label>重置日</label><input id="f_ms" type="number" min="1" max="31" value="1"><br>
-      <label>开始日期</label><input id="f_start" type="date"> <label>年费 ($)</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"> <label>带宽 Mbps</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><br>
+      <label>开始日期</label><input id="f_start" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽 Mbps</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><br>
       <label>备注</label><input id="f_note" size="40" placeholder="仅后台可见"> <label>公开备注</label><input id="f_pnote" size="40" placeholder="显示在主面板卡片上"><br>
       <button onclick="saveHostForm()">保存</button> <button onclick="closeHostForm()">取消</button>
       <div id="newInstall" class="mono" style="display:none"></div>
@@ -218,10 +235,42 @@ async function loadAll(){ try { await Promise.all([loadHosts(), loadTraffic(), l
 let allHosts = [];
 let statsByName = {};
 let editingName = null;
+// IP cell: exactly two lines, v4 first, v6 second, each nowrap (wide
+// enough or horizontal scroll, never broken mid-address). A missing
+// stack shows "v6 —" with no copy button; a present address gets its own
+// copy button that copies the bare address (no v4/v6 prefix).
 function ipCell(query){
-  if (!query) return '—';
-  if (query.includes(':')) return 'v4 —<br>v6 ' + esc(query);
-  return 'v4 ' + esc(query) + '<br>v6 —';
+  let v4 = '', v6 = '';
+  if (query) { if (query.includes(':')) v6 = query; else v4 = query; }
+  function line(label, addr){
+    if (!addr) return '<span class="ip-line">' + label + ' —</span>';
+    return '<span class="ip-line">' + label + ' ' + esc(addr)
+      + ' <button class="copybtn" data-ip="' + esc(addr) + '" onclick="copyIp(this)">复制</button></span>';
+  }
+  return line('v4', v4) + '<br>' + line('v6', v6);
+}
+// Copy one bare IP. Clipboard API first, legacy textarea+execCommand as
+// fallback; a failure shows the address so it is never silently lost.
+async function copyIp(btn){
+  const addr = btn.dataset.ip; if (!addr) return;
+  const orig = btn.textContent;
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(addr); ok = true;
+    }
+  } catch(e){ /* fall through to legacy path */ }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = addr; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy'); ta.remove();
+    } catch(e2){ ok = false; }
+  }
+  if (!ok) { showMsg('复制失败，请手动复制：' + addr, false); return; }
+  btn.textContent = '已复制';
+  setTimeout(function(){ btn.textContent = orig; }, 1500);
 }
 async function loadHosts() {
   const hosts = await api('/api/admin/hosts');
@@ -239,25 +288,124 @@ async function loadHosts() {
   if (tags.includes(cur)) sel.value = cur; else sel.value = '';
   const want = sel.value;
   const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
-  let html = '<table><tr><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>排序</th><th>节点</th><th>显示名</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费 ($)</th><th>带宽 Mbps</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
+  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>国旗</th><th>排序</th><th>节点</th><th>显示名</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>地区/类型</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始日期</th><th>年费</th><th>带宽 Mbps</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
   for (const h of rows) {
     const st = statsByName[h.name] || {};
     const flag = flagFor(st.country_code, h.location);
     const ver = st.version || (st.sys_info && st.sys_info.version) || '—';
     const ip = ipCell(st.ip_info && st.ip_info.query);
-    html += '<tr><td><input type="checkbox" class="host-check" value="'+esc(h.name)+'"></td>'
+    const cur = (h.currency && h.currency.trim()) ? h.currency.trim() : '$';
+    const feeCell = (h.annual_fee > 0) ? esc(cur) + h.annual_fee : '—';
+    const locParts = [];
+    if (flag) locParts.push('<span class="flag">' + flag + '</span>');
+    if (h.location) locParts.push(esc(h.location));
+    let locCell = locParts.join(' ');
+    if (h.type) locCell += (locCell ? ' / ' : '') + esc(h.type);
+    if (!locCell) locCell = '—';
+    html += '<tr data-name="'+esc(h.name)+'"><td class="drag-handle" title="拖动排序">☰</td>'
+      + '<td><input type="checkbox" class="host-check" value="'+esc(h.name)+'"></td>'
       + '<td><span class="flag">'+flag+'</span></td>'
-      + '<td>'+h.weight+'</td>'
-      + '<td>'+esc(h.name)+'</td><td>'+esc(h.alias)+'</td><td>'+esc(h.tag || '默认')+'</td>'
-      + '<td>'+ip+'</td><td>'+esc(ver)+'</td>'
-      + '<td>'+esc(h.location)+' / '+esc(h.type)+'</td>'
-      + '<td>'+Math.round(h.traffic_limit/GiB)+'</td><td>'+esc(h.traffic_mode)+'</td><td>'+h.monthstart+'</td>'
-      + '<td>'+esc(h.plan_start_date||'')+'</td><td>'+(h.annual_fee||0)+'</td><td>'+(h.bandwidth_mbps||0)+'</td>'
+      + '<td class="nw">'+h.weight+'</td>'
+      + '<td class="nw">'+esc(h.name)+'</td><td class="nw">'+esc(h.alias)+'</td><td class="nw">'+esc(h.tag || '默认')+'</td>'
+      + '<td>'+ip+'</td><td class="nw">'+esc(ver)+'</td>'
+      + '<td class="loc">'+locCell+'</td>'
+      + '<td class="nw">'+Math.round(h.traffic_limit/GiB)+'</td><td class="nw">'+esc(h.traffic_mode)+'</td><td class="nw">'+h.monthstart+'</td>'
+      + '<td class="nw">'+esc(h.plan_start_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+(h.bandwidth_mbps||0)+'</td>'
       + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+' <button class="pen" title="修改公开备注" onclick="editPublicNote(\''+h.name+'\')">✎</button></td>'
-      + '<td><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
-      + '<td><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
+      + '<td class="nw"><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
+      + '<td class="nw"><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
   }
   $('hosts').innerHTML = html + '</table>';
+  wireRowDrag();
+  setOrderDirty(false);
+}
+// --- drag-sort (batch 3): dragging only reorders locally; nothing is
+// submitted until "保存排序" converts the order into weight values.
+// The handle is the only drag source, so checkbox/edit/delete clicks
+// can never start a drag; leaving the page needs no nag (fresh load
+// simply drops the unsaved order).
+let hostOrder = [];
+let orderDirty = false;
+let draggedName = null;
+function setOrderDirty(dirty){
+  orderDirty = dirty;
+  $('saveOrderBtn').disabled = !dirty || $('tag_filter').value !== '';
+  $('orderHint').textContent = dirty
+    ? '顺序已改动，点保存排序才生效（保存前不要切分组筛选）。'
+    : '拖动 ☰ 换位后点保存排序才生效；筛选状态下不能排序，请先切回全部。';
+}
+function wireRowDrag(){
+  const table = document.querySelector('#hosts table');
+  if (!table) return;
+  hostOrder = [...table.querySelectorAll('tr[data-name]')].map(tr => tr.dataset.name);
+  table.querySelectorAll('.drag-handle').forEach(cell => {
+    cell.addEventListener('mousedown', function(){
+      if ($('tag_filter').value !== '') return;
+      const tr = cell.closest('tr');
+      if (tr) tr.draggable = true;
+    });
+  });
+  document.addEventListener('mouseup', function(){
+    document.querySelectorAll('#hosts tr[draggable="true"]').forEach(tr => tr.draggable = false);
+  });
+  table.querySelectorAll('tr[data-name]').forEach(tr => {
+    tr.addEventListener('dragstart', function(e){
+      if ($('tag_filter').value !== '') { e.preventDefault(); return; }
+      draggedName = tr.dataset.name;
+      tr.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', draggedName); } catch(err){}
+    });
+    tr.addEventListener('dragend', function(){
+      tr.classList.remove('dragging');
+      table.querySelectorAll('tr').forEach(r => r.classList.remove('drop-before','drop-after'));
+      draggedName = null;
+    });
+    tr.addEventListener('dragover', function(e){
+      if (!draggedName || tr.dataset.name === draggedName) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = tr.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      tr.classList.toggle('drop-after', after);
+      tr.classList.toggle('drop-before', !after);
+    });
+    tr.addEventListener('dragleave', function(){
+      tr.classList.remove('drop-before','drop-after');
+    });
+    tr.addEventListener('drop', function(e){
+      e.preventDefault();
+      if (!draggedName || tr.dataset.name === draggedName) return;
+      const rect = tr.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      const draggedRow = table.querySelector('tr[data-name="' + draggedName + '"]');
+      if (!draggedRow) return;
+      if (after) tr.after(draggedRow); else tr.before(draggedRow);
+      hostOrder = [...table.querySelectorAll('tr[data-name]')].map(r => r.dataset.name);
+      setOrderDirty(true);
+    });
+  });
+}
+async function saveOrder(){
+  if (!orderDirty) return;
+  if ($('tag_filter').value !== '') { showMsg('先把分组筛选切回全部再保存排序', false); return; }
+  const n = hostOrder.length;
+  let ok = 0, fail = 0;
+  // Main panel sorts weight DESC (stats.rs), so the first row needs the
+  // largest weight; step 10 leaves room for later manual tweaks.
+  for (let i = 0; i < n; i++) {
+    try { await api('/api/admin/hosts/'+encodeURIComponent(hostOrder[i]),'PUT',{weight: (n - i) * 10}); ok++; }
+    catch(e){ fail++; }
+  }
+  if (fail === 0) { showMsg('修改成功'); setOrderDirty(false); loadHosts(); }
+  else showMsg('保存排序完成：成功 '+ok+' 台，失败 '+fail+' 台', false);
+}
+function toggleCurCustom(){
+  $('f_cur_custom').style.display = ($('f_cur').value === 'custom') ? '' : 'none';
+}
+function hostFormCurrency(){
+  if ($('f_cur').value === 'custom') return $('f_cur_custom').value.trim();
+  return $('f_cur').value;
 }
 function toggleAll(box){
   document.querySelectorAll('.host-check').forEach(c => c.checked = box.checked);
@@ -305,6 +453,7 @@ function openHostForm(mode, name){
     set('f_location',''); set('f_type',''); set('f_weight','');
     set('f_limit','0'); $('f_mode').value='sum'; set('f_ms','1');
     set('f_start',''); set('f_fee',''); set('f_bw',''); set('f_note',''); set('f_pnote','');
+    $('f_cur').value = '$'; set('f_cur_custom',''); toggleCurCustom();
     $('f_name').readOnly = false; $('f_pass').placeholder = '客户端密码（必填）';
   } else {
     const h = allHosts.find(x => x.name === name);
@@ -313,6 +462,10 @@ function openHostForm(mode, name){
     set('f_location', h.location); set('f_type', h.type); set('f_weight', h.weight);
     set('f_limit', Math.round(h.traffic_limit/GiB)); $('f_mode').value = h.traffic_mode; set('f_ms', h.monthstart);
     set('f_start', h.plan_start_date||''); set('f_fee', h.annual_fee||0); set('f_bw', h.bandwidth_mbps||0);
+    const cur = (h.currency || '$').trim() || '$';
+    if (['$','¥','£','€'].includes(cur)) { $('f_cur').value = cur; set('f_cur_custom',''); }
+    else { $('f_cur').value = 'custom'; set('f_cur_custom', cur); }
+    toggleCurCustom();
     set('f_note', h.note||''); set('f_pnote', h.public_note||'');
     $('f_name').readOnly = true; $('f_pass').placeholder = '留空不改';
   }
@@ -326,7 +479,7 @@ async function saveHostForm(){
     if (editingName) {
       const body = {alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), bandwidth_mbps:parseInt($('f_bw').value)||0,
+        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:parseInt($('f_bw').value)||0,
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);
@@ -341,7 +494,7 @@ async function saveHostForm(){
       if (!pw) { showMsg('添加时密码不能为空', false); return; }
       const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
         monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
-        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), bandwidth_mbps:parseInt($('f_bw').value)||0,
+        plan_start_date:$('f_start').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:parseInt($('f_bw').value)||0,
         note:v('f_note'), public_note:v('f_pnote')};
       const w = $('f_weight').value.trim();
       if (w !== '') body.weight = parseInt(w);

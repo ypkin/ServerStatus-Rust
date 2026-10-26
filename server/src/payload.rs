@@ -128,6 +128,10 @@ pub struct HostStat {
     pub plan_start_date: String,
     #[serde(default)]
     pub annual_fee: f64,
+    /// Currency symbol for annual_fee, copied from the Host record
+    /// (fork). Empty on old stats means "$" (see stats.rs copy).
+    #[serde(default)]
+    pub currency: String,
     #[serde(default)]
     pub bandwidth_mbps: u32,
 

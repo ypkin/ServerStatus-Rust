@@ -99,8 +99,13 @@
     return (Math.round(mb / 1024 * 100) / 100) + 'GiB';
   }
 
-  function fmtFee(fee) {
-    return '$' + (Math.round(fee * 100) / 100);
+  function fmtFee(fee, cur) {
+    return (cur || '$') + (Math.round(fee * 100) / 100);
+  }
+
+  function fmtDate(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return '—'; }
   }
 
   function pct(used, total) {
@@ -111,7 +116,7 @@
   function planLine(s) {
     var parts = [];
     if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
-    if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee));
+    if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee, s.currency));
     if (s.bandwidth_mbps > 0) parts.push('带宽 ' + s.bandwidth_mbps + 'Mbps');
     if (s.traffic_limit > 0) parts.push('限额 ' + fmtGiB(s.traffic_limit));
     else if (parts.length > 0) parts.push('限额不限量');
@@ -149,7 +154,9 @@
   function detailLines(s) {
     var lines = [];
     var si = s.sys_info || {};
-    lines.push(planLine(s));
+    // Plan line plus live IPv4/IPv6 badges (batch 3: the expanded area
+    // must carry the plan + connectivity, not just the collapsed row).
+    lines.push(planLine(s) + ' · IPv4 ' + (s.online4 ? '✓' : '✗') + ' · IPv6 ' + (s.online6 ? '✓' : '✗'));
     var os = [si.os_name, si.os_release, si.kernel_version].filter(Boolean).join(' ');
     var sysParts = [];
     if (os) sysParts.push(os);
@@ -174,6 +181,7 @@
     if (s.month_rx + s.month_tx > 0) {
       tParts.push('本月入 ' + fmtGiB(s.month_rx) + ' / 出 ' + fmtGiB(s.month_tx));
     }
+    tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
     tParts.push('本月已用 ' + fmtGiB(s.month_used));
     tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
     tParts.push(s.traffic_limit > 0 ? '限额 ' + fmtGiB(s.traffic_limit) : '限额不限量');
@@ -184,6 +192,8 @@
     var boot = bootLine(s.uptime);
     if (boot) lines.push(boot);
     if (s.uptime_str) lines.push('在线时长：' + s.uptime_str);
+    lines.push('最后活动：' + fmtDate(s.latest_ts));
+    if (s.version) lines.push('版本号：' + s.version);
     probeLines(s).forEach(function (l) { lines.push(l); });
     if (s.public_note) lines.push('公开备注：' + s.public_note);
     return lines;
@@ -281,9 +291,14 @@
             display: (s.alias || s.name || '').trim(),
             plan_start_date: s.plan_start_date || '',
             annual_fee: s.annual_fee || 0,
+            currency: s.currency || '$',
             bandwidth_mbps: s.bandwidth_mbps || 0,
             traffic_limit: s.traffic_limit || 0,
             host_type: s.host_type || '',
+            online4: !!s.online4,
+            online6: !!s.online6,
+            latest_ts: s.latest_ts || 0,
+            version: s.version || '',
             cpu: (typeof s.cpu === 'number') ? s.cpu : null,
             memory_total: s.memory_total || 0,
             memory_used: s.memory_used || 0,

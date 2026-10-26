@@ -219,6 +219,11 @@ impl StatsMgr {
                         // the outgoing stat for stats.json.
                         stat_t.plan_start_date = info.plan_start_date.clone();
                         stat_t.annual_fee = info.annual_fee;
+                        stat_t.currency = if info.currency.is_empty() {
+                            "$".to_string()
+                        } else {
+                            info.currency.clone()
+                        };
                         stat_t.bandwidth_mbps = info.bandwidth_mbps;
                         stat_t.tag = info.tag.clone();
                         stat_t.public_note = info.public_note.clone();
@@ -538,6 +543,17 @@ impl StatsMgr {
                     srv.insert("ip_info".into(), serde_json::to_value(stat.ip_info.as_ref())?);
                     srv.insert("sys_info".into(), serde_json::to_value(stat.sys_info.as_ref())?);
                     srv.insert("ping_probes".into(), ping_probes_json(&ping, stat));
+                    // Fork: the proto IpInfo carries a country *name* only,
+                    // so derive the 2-letter code here for the admin flag
+                    // columns. Unknown names yield "" (text only, never a
+                    // guessed flag); the admin's own name mapping stays as
+                    // a second fallback for hand-filled locations.
+                    let cc = stat
+                        .ip_info
+                        .as_ref()
+                        .map(|i| country_code_for_country(&i.country))
+                        .unwrap_or("");
+                    srv.insert("country_code".into(), serde_json::json!(cc));
                 }
             }
         } else {
@@ -545,6 +561,238 @@ impl StatsMgr {
         }
 
         Ok(resp_json)
+    }
+}
+
+/// 2-letter country code for a geoip country *name* (fork). The proto
+/// IpInfo carries no code, so the admin flag columns derive it here
+/// instead of changing the proto (which would force a client rollout).
+/// Unknown or empty names yield "" — the admin then falls back to its
+/// own name mapping for hand-filled locations, and shows text only.
+pub fn country_code_for_country(name: &str) -> &'static str {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "united states" | "united states of america" | "usa" | "us" => "US",
+        "canada" => "CA",
+        "mexico" => "MX",
+        "guatemala" => "GT",
+        "belize" => "BZ",
+        "honduras" => "HN",
+        "el salvador" => "SV",
+        "nicaragua" => "NI",
+        "costa rica" => "CR",
+        "panama" => "PA",
+        "cuba" => "CU",
+        "jamaica" => "JM",
+        "haiti" => "HT",
+        "dominican republic" => "DO",
+        "puerto rico" => "PR",
+        "trinidad and tobago" => "TT",
+        "barbados" => "BB",
+        "bahamas" => "BS",
+        "bermuda" => "BM",
+        "cayman islands" => "KY",
+        "british virgin islands" | "virgin islands, british" => "VG",
+        "us virgin islands" | "virgin islands, u.s." => "VI",
+        "anguilla" => "AI",
+        "antigua and barbuda" => "AG",
+        "dominica" => "DM",
+        "grenada" => "GD",
+        "saint lucia" => "LC",
+        "saint vincent and the grenadines" => "VC",
+        "saint kitts and nevis" => "KN",
+        "montserrat" => "MS",
+        "aruba" => "AW",
+        "curacao" | "curaçao" => "CW",
+        "guadeloupe" => "GP",
+        "martinique" => "MQ",
+        "saint martin" => "MF",
+        "turks and caicos islands" => "TC",
+        "greenland" => "GL",
+        "brazil" => "BR",
+        "argentina" => "AR",
+        "chile" => "CL",
+        "colombia" => "CO",
+        "peru" => "PE",
+        "venezuela" => "VE",
+        "ecuador" => "EC",
+        "bolivia" => "BO",
+        "paraguay" => "PY",
+        "uruguay" => "UY",
+        "guyana" => "GY",
+        "suriname" => "SR",
+        "french guiana" => "GF",
+        "united kingdom" | "great britain" | "uk" | "gb" => "GB",
+        "ireland" => "IE",
+        "france" => "FR",
+        "germany" => "DE",
+        "netherlands" => "NL",
+        "belgium" => "BE",
+        "luxembourg" => "LU",
+        "switzerland" => "CH",
+        "austria" => "AT",
+        "italy" => "IT",
+        "spain" => "ES",
+        "portugal" => "PT",
+        "sweden" => "SE",
+        "norway" => "NO",
+        "denmark" => "DK",
+        "finland" => "FI",
+        "iceland" => "IS",
+        "poland" => "PL",
+        "czechia" | "czech republic" | "czech" => "CZ",
+        "slovakia" => "SK",
+        "slovenia" => "SI",
+        "hungary" => "HU",
+        "croatia" => "HR",
+        "bosnia and herzegovina" => "BA",
+        "serbia" => "RS",
+        "montenegro" => "ME",
+        "north macedonia" | "macedonia" => "MK",
+        "albania" => "AL",
+        "greece" => "GR",
+        "romania" => "RO",
+        "bulgaria" => "BG",
+        "moldova" => "MD",
+        "ukraine" => "UA",
+        "belarus" => "BY",
+        "russia" | "russian federation" => "RU",
+        "lithuania" => "LT",
+        "latvia" => "LV",
+        "estonia" => "EE",
+        "malta" => "MT",
+        "cyprus" => "CY",
+        "andorra" => "AD",
+        "monaco" => "MC",
+        "liechtenstein" => "LI",
+        "san marino" => "SM",
+        "vatican" | "vatican city" | "holy see" => "VA",
+        "gibraltar" => "GI",
+        "isle of man" => "IM",
+        "jersey" => "JE",
+        "guernsey" => "GG",
+        "faroe islands" => "FO",
+        "aland islands" | "åland islands" => "AX",
+        "svalbard" => "SJ",
+        "turkey" | "turkiye" => "TR",
+        "georgia" => "GE",
+        "armenia" => "AM",
+        "azerbaijan" => "AZ",
+        "kazakhstan" => "KZ",
+        "kyrgyzstan" => "KG",
+        "uzbekistan" => "UZ",
+        "tajikistan" => "TJ",
+        "turkmenistan" => "TM",
+        "mongolia" => "MN",
+        "china" => "CN",
+        "hong kong" => "HK",
+        "macau" | "macao" => "MO",
+        "taiwan" => "TW",
+        "japan" => "JP",
+        "south korea" | "korea" | "korea, south" => "KR",
+        "north korea" | "korea, north" => "KP",
+        "india" => "IN",
+        "pakistan" => "PK",
+        "bangladesh" => "BD",
+        "sri lanka" => "LK",
+        "nepal" => "NP",
+        "bhutan" => "BT",
+        "myanmar" | "burma" => "MM",
+        "thailand" => "TH",
+        "laos" => "LA",
+        "vietnam" | "viet nam" => "VN",
+        "cambodia" => "KH",
+        "malaysia" => "MY",
+        "singapore" => "SG",
+        "indonesia" => "ID",
+        "philippines" => "PH",
+        "brunei" => "BN",
+        "timor-leste" | "east timor" => "TL",
+        "papua new guinea" => "PG",
+        "fiji" => "FJ",
+        "tonga" => "TO",
+        "samoa" => "WS",
+        "vanuatu" => "VU",
+        "solomon islands" => "SB",
+        "new caledonia" => "NC",
+        "french polynesia" => "PF",
+        "guam" => "GU",
+        "american samoa" => "AS",
+        "northern mariana islands" => "MP",
+        "australia" => "AU",
+        "new zealand" => "NZ",
+        "israel" => "IL",
+        "palestine" => "PS",
+        "jordan" => "JO",
+        "lebanon" => "LB",
+        "syria" => "SY",
+        "iraq" => "IQ",
+        "iran" => "IR",
+        "afghanistan" => "AF",
+        "saudi arabia" => "SA",
+        "yemen" => "YE",
+        "oman" => "OM",
+        "united arab emirates" | "uae" => "AE",
+        "qatar" => "QA",
+        "bahrain" => "BH",
+        "kuwait" => "KW",
+        "egypt" => "EG",
+        "libya" => "LY",
+        "tunisia" => "TN",
+        "algeria" => "DZ",
+        "morocco" => "MA",
+        "western sahara" => "EH",
+        "mauritania" => "MR",
+        "mali" => "ML",
+        "niger" => "NE",
+        "chad" => "TD",
+        "sudan" => "SD",
+        "south sudan" => "SS",
+        "ethiopia" => "ET",
+        "eritrea" => "ER",
+        "djibouti" => "DJ",
+        "somalia" => "SO",
+        "kenya" => "KE",
+        "uganda" => "UG",
+        "tanzania" => "TZ",
+        "rwanda" => "RW",
+        "burundi" => "BI",
+        "congo" | "congo, rep." => "CG",
+        "democratic republic of the congo" | "congo, dem. rep." | "congo, democratic republic of the" => "CD",
+        "gabon" => "GA",
+        "equatorial guinea" => "GQ",
+        "cameroon" => "CM",
+        "central african republic" => "CF",
+        "nigeria" => "NG",
+        "benin" => "BJ",
+        "togo" => "TG",
+        "ghana" => "GH",
+        "ivory coast" | "côte d'ivoire" | "cote d'ivoire" => "CI",
+        "liberia" => "LR",
+        "sierra leone" => "SL",
+        "guinea" => "GN",
+        "guinea-bissau" => "GW",
+        "senegal" => "SN",
+        "gambia" => "GM",
+        "burkina faso" => "BF",
+        "cape verde" | "cabo verde" => "CV",
+        "sao tome and principe" => "ST",
+        "angola" => "AO",
+        "zambia" => "ZM",
+        "zimbabwe" => "ZW",
+        "malawi" => "MW",
+        "mozambique" => "MZ",
+        "botswana" => "BW",
+        "namibia" => "NA",
+        "south africa" => "ZA",
+        "lesotho" => "LS",
+        "eswatini" | "swaziland" => "SZ",
+        "madagascar" => "MG",
+        "mauritius" => "MU",
+        "seychelles" => "SC",
+        "comoros" => "KM",
+        "mayotte" => "YT",
+        "reunion" => "RE",
+        _ => "",
     }
 }
 
@@ -604,4 +852,29 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         stat.ping_10086_v6,
     );
     serde_json::Value::Array(out)
+}
+
+#[cfg(test)]
+mod country_tests {
+    use super::*;
+
+    #[test]
+    fn country_code_mapping_covers_live_fleet() {
+        // Names actually seen in the fleet's ip_info.country values.
+        assert_eq!(country_code_for_country("Hong Kong"), "HK");
+        assert_eq!(country_code_for_country("United States"), "US");
+        assert_eq!(country_code_for_country("Japan"), "JP");
+        assert_eq!(country_code_for_country("Germany"), "DE");
+        assert_eq!(country_code_for_country("Netherlands"), "NL");
+        assert_eq!(country_code_for_country("United Kingdom"), "GB");
+        assert_eq!(country_code_for_country("Singapore"), "SG");
+        assert_eq!(country_code_for_country("France"), "FR");
+        assert_eq!(country_code_for_country("  japan  "), "JP");
+    }
+
+    #[test]
+    fn unknown_country_yields_empty_not_a_guess() {
+        assert_eq!(country_code_for_country(""), "");
+        assert_eq!(country_code_for_country("Somewhere New"), "");
+    }
 }
