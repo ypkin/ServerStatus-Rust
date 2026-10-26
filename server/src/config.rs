@@ -25,13 +25,24 @@ fn default_tls_dir() -> String {
     "tls".to_string()
 }
 fn default_ping_cu() -> String {
-    "cu.tz.cloudcpp.com:80".to_string()
+    // No prefilled probe addresses: empty means "user has not set this
+    // probe", and unset probes are skipped, never probed with a default.
+    String::new()
 }
 fn default_ping_ct() -> String {
-    "ct.tz.cloudcpp.com:80".to_string()
+    String::new()
 }
 fn default_ping_cm() -> String {
-    "cm.tz.cloudcpp.com:80".to_string()
+    String::new()
+}
+fn default_ping_cu_name() -> String {
+    "联通".to_string()
+}
+fn default_ping_ct_name() -> String {
+    "电信".to_string()
+}
+fn default_ping_cm_name() -> String {
+    "移动".to_string()
 }
 fn default_traffic_alert_percent() -> u32 {
     80
@@ -41,26 +52,150 @@ fn default_traffic_alert_percent() -> u32 {
 /// defaults; the admin panel may override them at runtime and the override
 /// is persisted in `admin.json` (see `admin.rs`). Clients fetch the
 /// effective values on every report instead of needing per-host CLI flags.
+///
+/// Each carrier has a user-editable display name (default 联通/电信/移动)
+/// plus an IPv4 and an IPv6 probe address. The `cu_addr` / `ct_addr` /
+/// `cm_addr` keys are the legacy spelling and stay the canonical IPv4
+/// storage; `*_addr_v4` are explicit aliases that win when non-empty, and
+/// an empty explicit v4 falls back to the legacy key (so configs written
+/// before the v4/v6 split keep working unchanged).
+/// An empty address means "user has not set this probe/stack": it is
+/// skipped, never probed with a prefilled default. There are no default
+/// probe addresses anymore.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PingConfig {
     #[serde(default = "default_as_true")]
     pub enabled: bool,
+    #[serde(default = "default_ping_cu_name")]
+    pub cu_name: String,
+    #[serde(default = "default_ping_ct_name")]
+    pub ct_name: String,
+    #[serde(default = "default_ping_cm_name")]
+    pub cm_name: String,
     #[serde(default = "default_ping_cu")]
     pub cu_addr: String,
     #[serde(default = "default_ping_ct")]
     pub ct_addr: String,
     #[serde(default = "default_ping_cm")]
     pub cm_addr: String,
+    #[serde(default)]
+    pub cu_addr_v4: String,
+    #[serde(default)]
+    pub ct_addr_v4: String,
+    #[serde(default)]
+    pub cm_addr_v4: String,
+    #[serde(default)]
+    pub cu_addr_v6: String,
+    #[serde(default)]
+    pub ct_addr_v6: String,
+    #[serde(default)]
+    pub cm_addr_v6: String,
+}
+
+impl PingConfig {
+    pub fn v4_cu(&self) -> &str {
+        if self.cu_addr_v4.is_empty() {
+            &self.cu_addr
+        } else {
+            &self.cu_addr_v4
+        }
+    }
+
+    pub fn v4_ct(&self) -> &str {
+        if self.ct_addr_v4.is_empty() {
+            &self.ct_addr
+        } else {
+            &self.ct_addr_v4
+        }
+    }
+
+    pub fn v4_cm(&self) -> &str {
+        if self.cm_addr_v4.is_empty() {
+            &self.cm_addr
+        } else {
+            &self.cm_addr_v4
+        }
+    }
+
+    /// Clone with every IPv4 key (legacy + explicit) set to the effective
+    /// IPv4 address, so API responses never disagree between the two
+    /// spellings, and with empty display names reset to the carrier
+    /// defaults. IPv6 addresses pass through untouched.
+    pub fn normalized(&self) -> Self {
+        let mut p = self.clone();
+        p.cu_addr = self.v4_cu().to_string();
+        p.cu_addr_v4 = p.cu_addr.clone();
+        p.ct_addr = self.v4_ct().to_string();
+        p.ct_addr_v4 = p.ct_addr.clone();
+        p.cm_addr = self.v4_cm().to_string();
+        p.cm_addr_v4 = p.cm_addr.clone();
+        if p.cu_name.is_empty() {
+            p.cu_name = default_ping_cu_name();
+        }
+        if p.ct_name.is_empty() {
+            p.ct_name = default_ping_ct_name();
+        }
+        if p.cm_name.is_empty() {
+            p.cm_name = default_ping_cm_name();
+        }
+        p
+    }
 }
 
 impl Default for PingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            cu_name: default_ping_cu_name(),
+            ct_name: default_ping_ct_name(),
+            cm_name: default_ping_cm_name(),
             cu_addr: default_ping_cu(),
             ct_addr: default_ping_ct(),
             cm_addr: default_ping_cm(),
+            cu_addr_v4: String::new(),
+            ct_addr_v4: String::new(),
+            cm_addr_v4: String::new(),
+            cu_addr_v6: String::new(),
+            ct_addr_v6: String::new(),
+            cm_addr_v6: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+
+    #[test]
+    fn v4_falls_back_to_legacy_key() {
+        // No prefilled defaults anymore: a fresh config probes nothing.
+        let p = PingConfig::default();
+        assert!(p.v4_cu().is_empty());
+        assert!(p.v4_ct().is_empty());
+        assert!(p.v4_cm().is_empty());
+        assert_eq!(p.cu_name, "联通");
+        // Pre-split admin.json has no v4/v6/name keys at all.
+        let legacy: PingConfig =
+            serde_json::from_str(r#"{"enabled":true,"cu_addr":"a:80","ct_addr":"b:80","cm_addr":"c:80"}"#)
+                .unwrap();
+        assert_eq!(legacy.v4_cu(), "a:80");
+        assert!(legacy.cu_addr_v6.is_empty());
+        let n = legacy.normalized();
+        assert_eq!(n.cu_addr, "a:80");
+        assert_eq!(n.cu_addr_v4, "a:80");
+        assert_eq!(n.cu_name, "联通");
+    }
+
+    #[test]
+    fn explicit_v4_wins_and_normalized_agrees() {
+        let mut p = PingConfig::default();
+        p.cu_addr_v4 = "10.0.0.1:80".to_string();
+        p.cu_addr_v6 = "2001:db8::1:80".to_string();
+        assert_eq!(p.v4_cu(), "10.0.0.1:80");
+        let n = p.normalized();
+        assert_eq!(n.cu_addr, "10.0.0.1:80");
+        assert_eq!(n.cu_addr_v4, "10.0.0.1:80");
+        assert_eq!(n.cu_addr_v6, "2001:db8::1:80");
     }
 }
 

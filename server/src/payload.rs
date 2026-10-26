@@ -44,6 +44,22 @@ pub struct HostStat {
     pub time_189: f64,
     pub time_10086: f64,
 
+    // Fork: IPv6 three-carrier probe results (loss % / latency ms).
+    // Zero means "not probed" (no v6 address configured, or an old client).
+    // Defaults keep old clients' reports deserializing.
+    #[serde(default)]
+    pub ping_10010_v6: f64,
+    #[serde(default)]
+    pub ping_189_v6: f64,
+    #[serde(default)]
+    pub ping_10086_v6: f64,
+    #[serde(default)]
+    pub time_10010_v6: f64,
+    #[serde(default)]
+    pub time_189_v6: f64,
+    #[serde(default)]
+    pub time_10086_v6: f64,
+
     #[serde(rename(deserialize = "tcp"))]
     pub tcp_count: u32,
     #[serde(rename(deserialize = "udp"))]
@@ -67,6 +83,15 @@ pub struct HostStat {
     // internal accounting key, not public data).
     #[serde(default, skip_serializing)]
     pub boot_id: String,
+
+    // Fork: client auto-detection (see stats.rs precedence). Detected
+    // values only fill in when neither an explicit client value nor a
+    // backend host value exists; they are resolved into location/type
+    // before stats are served, so they never appear in stats.json.
+    #[serde(default, skip_serializing)]
+    pub location_detected: String,
+    #[serde(default, skip_serializing)]
+    pub type_detected: String,
 
     // Fork: server-side traffic accounting (see traffic.rs). Set by the
     // server on every report; all default to zero for old clients/themes.
@@ -95,6 +120,16 @@ pub struct HostStat {
     pub traffic_percent: u64,
     #[serde(default)]
     pub month_start: String,
+
+    // Fork: plan display (see web/plan-overlay.js). Copied from the
+    // registered Host record on every report; empty/zero = unset, never
+    // fabricated (in particular no expiry date is derived here).
+    #[serde(default)]
+    pub plan_start_date: String,
+    #[serde(default)]
+    pub annual_fee: f64,
+    #[serde(default)]
+    pub bandwidth_mbps: u32,
 
     pub cpu: f64,
     pub memory_total: u64,

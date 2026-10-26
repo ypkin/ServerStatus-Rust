@@ -169,12 +169,21 @@ impl StatsMgr {
                             continue;
                         }
 
-                        // 补齐
+                        // 补齐 precedence: explicit client value >
+                        // backend host value > client auto-detection.
+                        // (Detected values arrive in separate fields so
+                        // they can never shadow an explicit setting.)
                         if stat_t.location.is_empty() {
                             stat_t.location = info.location.clone();
                         }
+                        if stat_t.location.is_empty() {
+                            stat_t.location = stat_t.location_detected.clone();
+                        }
                         if stat_t.host_type.is_empty() {
                             stat_t.host_type = info.r#type.clone();
+                        }
+                        if stat_t.host_type.is_empty() {
+                            stat_t.host_type = stat_t.type_detected.clone();
                         }
                         stat_t.notify = info.notify && stat_t.notify;
                         stat_t.pos = info.pos;
@@ -199,6 +208,14 @@ impl StatsMgr {
                         let (traffic_limit, traffic_mode, monthstart) =
                             crate::admin::effective_host_settings(&stat_t.name, info);
                         stat_t.traffic_limit = traffic_limit;
+                        // Fork plan display (see web/plan-overlay.js): the
+                        // registered Host record already carries the
+                        // effective plan (panel edits update it, group
+                        // members inherit the template), so copy it onto
+                        // the outgoing stat for stats.json.
+                        stat_t.plan_start_date = info.plan_start_date.clone();
+                        stat_t.annual_fee = info.annual_fee;
+                        stat_t.bandwidth_mbps = info.bandwidth_mbps;
                         stat_t.traffic_mode = traffic_mode.clone();
                         let mut traffic_notify = false;
                         if stat_t.vnstat {
@@ -474,7 +491,16 @@ impl StatsMgr {
     }
 
     pub fn get_stats_json(&self) -> String {
-        self.resp_json.lock().unwrap().to_string()
+        // Serve the enriched view (ip_info, sys_info, ping_probes) rather
+        // than the timer thread's cached plain serialization, which drops
+        // every skip_serializing field. The overlay (plan/spec/probe
+        // lines) and the React detail view read those fields from here.
+        // Falls back to the cached string if enrichment ever fails.
+        match self.get_all_info() {
+            Ok(v) => serde_json::to_string(&v)
+                .unwrap_or_else(|_| self.resp_json.lock().unwrap().to_string()),
+            Err(_) => self.resp_json.lock().unwrap().to_string(),
+        }
     }
 
     #[allow(clippy::unused_self)]
@@ -499,11 +525,13 @@ impl StatsMgr {
         let data = self.stats_data.lock().unwrap();
         let mut resp_json = serde_json::to_value(&*data)?;
         // for skip_serializing
+        let ping = crate::admin::effective_ping();
         if let Some(srv_list) = resp_json["servers"].as_array_mut() {
             for (idx, stat) in data.servers.iter().enumerate() {
                 if let Some(srv) = srv_list[idx].as_object_mut() {
                     srv.insert("ip_info".into(), serde_json::to_value(stat.ip_info.as_ref())?);
                     srv.insert("sys_info".into(), serde_json::to_value(stat.sys_info.as_ref())?);
+                    srv.insert("ping_probes".into(), ping_probes_json(&ping, stat));
                 }
             }
         } else {
@@ -512,4 +540,62 @@ impl StatsMgr {
 
         Ok(resp_json)
     }
+}
+
+/// Probe latency rows for one server in stats.json (see plan-overlay.js).
+/// Only probes/stacks the user actually configured are included; when
+/// probing is disabled the list is empty. The legacy time_*/ping_* fields
+/// are untouched, so the precompiled React panel keeps working.
+fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_json::Value {
+    if !ping.enabled {
+        return serde_json::json!([]);
+    }
+    let mut out = Vec::new();
+    let mut push = |name: &str,
+                    v4_set: bool,
+                    time_v4: f64,
+                    loss_v4: f64,
+                    v6_set: bool,
+                    time_v6: f64,
+                    loss_v6: f64| {
+        if !v4_set && !v6_set {
+            return;
+        }
+        let mut item = serde_json::json!({ "name": name });
+        if v4_set {
+            item["v4"] = serde_json::json!({ "time": time_v4, "loss": loss_v4 });
+        }
+        if v6_set {
+            item["v6"] = serde_json::json!({ "time": time_v6, "loss": loss_v6 });
+        }
+        out.push(item);
+    };
+    push(
+        &ping.cu_name,
+        !ping.cu_addr.is_empty(),
+        stat.time_10010,
+        stat.ping_10010,
+        !ping.cu_addr_v6.is_empty(),
+        stat.time_10010_v6,
+        stat.ping_10010_v6,
+    );
+    push(
+        &ping.ct_name,
+        !ping.ct_addr.is_empty(),
+        stat.time_189,
+        stat.ping_189,
+        !ping.ct_addr_v6.is_empty(),
+        stat.time_189_v6,
+        stat.ping_189_v6,
+    );
+    push(
+        &ping.cm_name,
+        !ping.cm_addr.is_empty(),
+        stat.time_10086,
+        stat.ping_10086,
+        !ping.cm_addr_v6.is_empty(),
+        stat.time_10086_v6,
+        stat.ping_10086_v6,
+    );
+    serde_json::Value::Array(out)
 }

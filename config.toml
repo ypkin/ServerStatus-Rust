@@ -336,9 +336,18 @@ enabled = false
 # so no per-host CLI change is needed. Empty address = keep client value.
 [ping]
 enabled = true
-cu_addr = "cu.tz.cloudcpp.com:80"
-ct_addr = "ct.tz.cloudcpp.com:80"
-cm_addr = "cm.tz.cloudcpp.com:80"
+# Probe display names (editable in /admin); addresses are empty by design:
+# empty = user has not set this probe/stack, and it is skipped, never
+# probed with a prefilled default.
+cu_name = "联通"
+ct_name = "电信"
+cm_name = "移动"
+cu_addr = ""
+ct_addr = ""
+cm_addr = ""
+cu_addr_v6 = ""
+ct_addr_v6 = ""
+cm_addr_v6 = ""
 
 # fork: PushPlus offline alerts (https://www.pushplus.plus). The panel
 # (/admin) can enable it and set the token at runtime; the token is never

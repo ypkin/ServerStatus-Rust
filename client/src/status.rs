@@ -376,20 +376,36 @@ fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
     });
 }
 
-/// Fork: apply server-pushed three-carrier probe settings (see the
-/// server's report response). All-empty addresses mean "server does not
-/// manage ping" (e.g. an upstream server): keep the CLI settings.
+/// Fork: apply server-pushed probe settings (see the server's report
+/// response). `managed` tells the two cases apart:
+/// - managed=false: an old server that sends no probe config at all.
+///   Keep the CLI settings (the pre-fork behavior).
+/// - managed=true: this fork's server, which always sends an explicit
+///   config (enabled + 6 addresses, possibly all empty). The server is
+///   authoritative: an empty address means "skip that probe/stack" (the
+///   cell idles on an empty URI), never a fallback to CLI defaults.
 /// A disabled server setting stops probing but keeps the addresses, so a
 /// later re-enable resumes without another client change.
-pub fn apply_ping_config(enabled: bool, cu: &str, ct: &str, cm: &str) {
-    if cu.is_empty() && ct.is_empty() && cm.is_empty() {
+pub fn apply_ping_config(
+    managed: bool,
+    enabled: bool,
+    cu: &str,
+    ct: &str,
+    cm: &str,
+    cu_v6: &str,
+    ct_v6: &str,
+    cm_v6: &str,
+) {
+    if !managed {
         return;
     }
     let apply = |cell: &OnceCell<Arc<Mutex<PingData>>>, addr: &str| {
         if let Some(data) = cell.get() {
             if let Ok(mut o) = data.lock() {
                 o.enabled = enabled;
-                if enabled && !addr.is_empty() {
+                if enabled {
+                    // Authoritative overwrite: empty idles the cell,
+                    // non-empty points it at the new address.
                     o.probe_uri = addr.to_string();
                 }
             }
@@ -398,11 +414,19 @@ pub fn apply_ping_config(enabled: bool, cu: &str, ct: &str, cm: &str) {
     apply(&G_PING_10010, cu);
     apply(&G_PING_189, ct);
     apply(&G_PING_10086, cm);
+    apply(&G_PING_10010_V6, cu_v6);
+    apply(&G_PING_189_V6, ct_v6);
+    apply(&G_PING_10086_V6, cm_v6);
 }
 
 pub static G_PING_10010: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 pub static G_PING_189: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 pub static G_PING_10086: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+/// IPv6 probe cells. They start with an empty probe URI, so their threads
+/// idle (see `start_ping_collect_t`) until the server pushes a v6 address.
+pub static G_PING_10010_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+pub static G_PING_189_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+pub static G_PING_10086_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 
 pub fn start_all_ping_collect_t(args: &Args) {
     let ping_enabled = !args.disable_ping;
@@ -430,11 +454,40 @@ pub fn start_all_ping_collect_t(args: &Args) {
             enabled: ping_enabled,
         })))
         .unwrap();
+    // IPv6 cells: no CLI defaults (server-managed only); empty URI idles
+    // the thread until the server pushes a v6 address.
+    G_PING_10010_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
+    G_PING_189_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
+    G_PING_10086_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
 
     if !args.disable_ping {
         start_ping_collect_t(G_PING_10010.get().unwrap());
         start_ping_collect_t(G_PING_189.get().unwrap());
         start_ping_collect_t(G_PING_10086.get().unwrap());
+        start_ping_collect_t(G_PING_10010_V6.get().unwrap());
+        start_ping_collect_t(G_PING_189_V6.get().unwrap());
+        start_ping_collect_t(G_PING_10086_V6.get().unwrap());
     }
 }
 
@@ -497,5 +550,20 @@ pub fn sample(args: &Args, stat: &mut StatRequest) {
         let o = &*G_PING_10086.get().unwrap().lock().unwrap();
         stat.ping_10086 = o.lost_rate.into();
         stat.time_10086 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_10010_V6.get().unwrap().lock().unwrap();
+        stat.ping_10010_v6 = o.lost_rate.into();
+        stat.time_10010_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_189_V6.get().unwrap().lock().unwrap();
+        stat.ping_189_v6 = o.lost_rate.into();
+        stat.time_189_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_10086_V6.get().unwrap().lock().unwrap();
+        stat.ping_10086_v6 = o.lost_rate.into();
+        stat.time_10086_v6 = o.ping_time.into();
     }
 }

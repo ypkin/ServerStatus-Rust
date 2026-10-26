@@ -458,10 +458,14 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
     (
         StatusCode::OK,
         Json(json!({
+            "ping_managed": true,
             "ping_enabled": ping.enabled,
             "ping_cu": ping.cu_addr,
             "ping_ct": ping.ct_addr,
             "ping_cm": ping.cm_addr,
+            "ping_cu_v6": ping.cu_addr_v6,
+            "ping_ct_v6": ping.ct_addr_v6,
+            "ping_cm_v6": ping.cm_addr_v6,
         })),
     )
         .into_response()

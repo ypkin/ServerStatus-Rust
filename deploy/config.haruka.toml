@@ -23,11 +23,18 @@ group_gc = 30
 notify_interval = 30
 
 # Three-carrier probes (panel-overridable at runtime, see /admin).
+# No prefilled addresses: empty = unset, and unset probes are skipped.
 [ping]
 enabled = true
-cu_addr = "cu.tz.cloudcpp.com:80"
-ct_addr = "ct.tz.cloudcpp.com:80"
-cm_addr = "cm.tz.cloudcpp.com:80"
+cu_name = "联通"
+ct_name = "电信"
+cm_name = "移动"
+cu_addr = ""
+ct_addr = ""
+cm_addr = ""
+cu_addr_v6 = ""
+ct_addr_v6 = ""
+cm_addr_v6 = ""
 
 # PushPlus offline alerts: disabled until the panel owner enables it in
 # /admin with their own token (token is never returned by any API).

@@ -93,12 +93,15 @@ fn save_admin_store() -> Result<(), String> {
 }
 
 /// Effective ping settings: admin override wins, otherwise config defaults.
+/// The result is normalized, so the legacy v4 keys always equal the
+/// effective v4 addresses even when the stored config only used one
+/// spelling (pre-split files, older cached admin pages).
 pub fn effective_ping() -> PingConfig {
     if let Some(p) = ADMIN.lock().unwrap().ping.clone() {
-        return p;
+        return p.normalized();
     }
     match G_CONFIG.get() {
-        Some(cfg) => cfg.ping.clone(),
+        Some(cfg) => cfg.ping.clone().normalized(),
         None => PingConfig::default(),
     }
 }
@@ -248,28 +251,52 @@ pub async fn get_traffic(_claims: jwt::Claims) -> impl IntoResponse {
 pub async fn get_hosts(_claims: jwt::Claims) -> impl IntoResponse {
     let admin_names: Vec<String> = ADMIN.lock().unwrap().admin_hosts.iter().map(|h| h.name.clone()).collect();
     let mut out = Vec::new();
-    {
+    // Collect host records first, then overlay live values after the
+    // HOSTS_MAP guard is dropped (never nest registry locks).
+    let list: Vec<Host> = {
         let hosts = crate::registry::HOSTS_MAP.lock().unwrap();
-        let mut list: Vec<&Host> = hosts.values().collect();
+        let mut list: Vec<Host> = hosts.values().cloned().collect();
         list.sort_by_key(|h| h.pos);
-        for h in list {
-            let (limit, mode, monthstart) = effective_host_settings(&h.name, h);
-            let source = if admin_names.contains(&h.name) {
-                "admin"
-            } else if !h.gid.is_empty() {
-                "group"
-            } else {
-                "config"
-            };
-            out.push(json!({
-                "name": h.name, "alias": h.alias, "location": h.location,
-                "type": h.r#type, "notify": h.notify, "disabled": h.disabled,
-                "labels": h.labels, "gid": h.gid, "source": source,
-                "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
-                "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
-                "bandwidth_mbps": h.bandwidth_mbps,
-            }));
+        list
+    };
+    // Live location/type from the latest report (already resolved with
+    // explicit > backend > detected precedence in stats.rs). Shown when
+    // the host record itself has nothing, so auto-detected values appear
+    // in the backend node table without ever being written back into the
+    // record (a later re-detection can still replace them).
+    let live: HashMap<String, (String, String)> = {
+        let stats = crate::registry::STAT_MAP.lock().unwrap();
+        stats
+            .iter()
+            .map(|(n, s)| (n.clone(), (s.location.clone(), s.host_type.clone())))
+            .collect()
+    };
+    for h in &list {
+        let (limit, mode, monthstart) = effective_host_settings(&h.name, h);
+        let source = if admin_names.contains(&h.name) {
+            "admin"
+        } else if !h.gid.is_empty() {
+            "group"
+        } else {
+            "config"
+        };
+        let (mut location, mut host_type) = (h.location.clone(), h.r#type.clone());
+        if let Some((live_loc, live_type)) = live.get(&h.name) {
+            if location.is_empty() {
+                location = live_loc.clone();
+            }
+            if host_type.is_empty() {
+                host_type = live_type.clone();
+            }
         }
+        out.push(json!({
+            "name": h.name, "alias": h.alias, "location": location,
+            "type": host_type, "notify": h.notify, "disabled": h.disabled,
+            "labels": h.labels, "gid": h.gid, "source": source,
+            "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
+            "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
+            "bandwidth_mbps": h.bandwidth_mbps,
+        }));
     }
     (StatusCode::OK, axum::Json(json!(out)))
 }
@@ -354,9 +381,11 @@ pub async fn get_ping(_claims: jwt::Claims) -> impl IntoResponse {
 }
 
 pub async fn put_ping(_claims: jwt::Claims, Json(body): Json<PingConfig>) -> impl IntoResponse {
-    if body.enabled && (body.cu_addr.is_empty() || body.ct_addr.is_empty() || body.cm_addr.is_empty()) {
-        return err(StatusCode::BAD_REQUEST, "probe addresses must not be empty when enabled");
-    }
+    // Normalize first: an explicit v4 wins, an empty explicit v4 falls back
+    // to the legacy key, empty display names reset to carrier defaults.
+    // Empty addresses are valid: they mean "this probe/stack is not set"
+    // and the client skips it. No address is ever required.
+    let body = body.normalized();
     ADMIN.lock().unwrap().ping = Some(body);
     match save_admin_store() {
         Ok(()) => (StatusCode::OK, axum::Json(json!({ "ok": true }))),
