@@ -106,6 +106,32 @@
     document.head.appendChild(st);
   }
 
+  // Dark-mode detail text (2026-10-27): the overlay detail block's
+  // text colours are hardcoded light-mode inline styles (#111827
+  // summary, #6b7280 lines, #374151 inactive buttons), so in dark
+  // mode they sit dark-on-dark and are unreadable (phone screenshot:
+  // summary/overview/probe lines and inactive tabs all but invisible,
+  // while the native table rows are white and fine). Inline styles
+  // beat stylesheets, hence !important. Scoped strictly to
+  // [data-ssr-detail] descendants; the site's dark mode is the
+  // Tailwind `.dark` class on <html> (the bundle toggles
+  // documentElement), so these rules never apply in light mode and
+  // the light appearance is byte-for-byte unchanged. The tooltip chip
+  // keeps its own dark bg + white text (excluded via its fixed
+  // position) and the chart svg keeps its own light card (#f9fafb bg,
+  // #9ca3af axis labels), readable as-is, so both are left alone.
+  function ensureDetailDarkStyle() {
+    if (document.getElementById('ssr-detail-dark')) return;
+    var st = document.createElement('style');
+    st.id = 'ssr-detail-dark';
+    st.textContent =
+      '.dark [data-ssr-detail]{color:#f9fafb !important;}'
+      + '.dark [data-ssr-detail] div:not([style*="position:fixed"]){color:#d1d5db !important;}'
+      + '.dark [data-ssr-detail] > div:first-child{color:#f9fafb !important;}'
+      + '.dark [data-ssr-detail] button{color:#e5e7eb !important;}';
+    document.head.appendChild(st);
+  }
+
   function renderPills() {
     if (!haveStats) return;
     var counts = pillsData();
@@ -616,7 +642,7 @@
     // snaps to the nearest column with data and shows that column's
     // values with its own timestamp, so time and values never disagree.
     var tip = document.createElement('div');
-    tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;white-space:nowrap;display:none';
+    tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;display:none';
     var showTip = function (e) {
       var rect = svg.getBoundingClientRect();
       if (!rect.width) return;
@@ -664,16 +690,36 @@
           showTs = snapTs;
         }
       }
-      var parts = drawn.map(function (s, idx) {
-        var v = vals[idx];
-        return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
-      });
-      tip.textContent = (allDash && snapTs === null)
-        ? '暂无数据'
-        : ((showTs !== null ? fmtT(showTs) + ' · ' : '') + parts.join(' · '));
+      // Vertical layout (2026-10-27): time on its own line, one
+      // probe road per line (only configured roads — drawn is built
+      // from configured probes only; a missing value still shows a
+      // dash). The old single line ran past the viewport's right
+      // edge when hovering near it (phone screenshot: cut off after
+      // "联通 v6 331"). Gap snap above is untouched: vals/showTs are
+      // already the snapped column's by the time we render.
+      while (tip.firstChild) tip.removeChild(tip.firstChild);
+      if (allDash && snapTs === null) {
+        tip.appendChild(document.createTextNode('暂无数据'));
+      } else {
+        if (showTs !== null) {
+          var tline = document.createElement('div');
+          tline.textContent = fmtT(showTs);
+          tip.appendChild(tline);
+        }
+        drawn.forEach(function (s, idx) {
+          var v = vals[idx];
+          var vline = document.createElement('div');
+          vline.textContent = s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
+          tip.appendChild(vline);
+        });
+      }
       tip.style.display = 'block';
-      tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
-      tip.style.top = Math.min(e.clientY + 12, window.innerHeight - 40) + 'px';
+      // Clamp with the tip's real size (it is now taller and narrower
+      // than the old fixed 220x40 guess), so it never runs off the
+      // right or bottom edge; 8px margin on every side.
+      var tw = tip.offsetWidth, th = tip.offsetHeight;
+      tip.style.left = Math.max(8, Math.min(e.clientX + 12, window.innerWidth - tw - 8)) + 'px';
+      tip.style.top = Math.max(8, Math.min(e.clientY + 12, window.innerHeight - th - 8)) + 'px';
     };
     var hideTip = function () { tip.style.display = 'none'; };
     var hover = document.createElementNS(svgNS, 'rect');
@@ -1067,6 +1113,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     ensureHeaderFixStyle();
+    ensureDetailDarkStyle();
     refresh();
     setInterval(refresh, 30000);
     document.addEventListener('click', onDocClick);
