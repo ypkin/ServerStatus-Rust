@@ -13,6 +13,13 @@ workspace = "/data"
 admin_user = "__ADMIN_USER__"
 admin_pass = "__ADMIN_PASS__"
 
+# JWT signing secret: set this to a stable random value at deploy time.
+# If left empty, the server generates a fresh secret on every start,
+# which invalidates all logged-in admin sessions on each container
+# restart (the next save then fails with "Invalid token"). The live
+# value lives only in the deployed data/config.toml, never in the repo.
+# jwt_secret = "__JWT_SECRET__"
+
 # Public report URL: agents use https://ssr.passall.us/report, and the
 # panel derives one-click install links from this origin.
 server_url = "https://ssr.passall.us/report"
