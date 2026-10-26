@@ -207,6 +207,25 @@ impl StatsMgr {
                         info.latest_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         stat_t.latest_ts = info.latest_ts;
 
+                        // Fork: server-side probe latency history (see
+                        // ping_hist.rs). Every report's six probe readings
+                        // are bucketed here, so the latency chart no
+                        // longer depends on the browser staying open to
+                        // sample. Slot keys, not display names, so a
+                        // probe rename keeps one continuous series.
+                        crate::ping_hist::record(
+                            &stat_t.name,
+                            stat_t.latest_ts as i64,
+                            &[
+                                crate::ping_hist::ProbeReading { slot: "cu:v4", time_ms: stat_t.time_10010, loss: stat_t.ping_10010 },
+                                crate::ping_hist::ProbeReading { slot: "cu:v6", time_ms: stat_t.time_10010_v6, loss: stat_t.ping_10010_v6 },
+                                crate::ping_hist::ProbeReading { slot: "ct:v4", time_ms: stat_t.time_189, loss: stat_t.ping_189 },
+                                crate::ping_hist::ProbeReading { slot: "ct:v6", time_ms: stat_t.time_189_v6, loss: stat_t.ping_189_v6 },
+                                crate::ping_hist::ProbeReading { slot: "cm:v4", time_ms: stat_t.time_10086, loss: stat_t.ping_10086 },
+                                crate::ping_hist::ProbeReading { slot: "cm:v6", time_ms: stat_t.time_10086_v6, loss: stat_t.ping_10086_v6 },
+                            ],
+                        );
+
                         // Fork traffic accounting (see traffic.rs). Effective
                         // settings are base config merged with admin overrides.
                         let (traffic_limit, traffic_mode, monthstart) =
@@ -469,6 +488,7 @@ impl StatsMgr {
                 if latest_save_ts + SAVE_INTERVAL < now {
                     latest_save_ts = now;
                     crate::traffic::save_traffic();
+                    crate::ping_hist::save();
                     if !resp.servers.is_empty() {
                         if let Ok(mut file) = File::create("stats.json") {
                             file.write_all(serde_json::to_string(&resp).unwrap().as_bytes());
@@ -853,7 +873,8 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         return serde_json::json!([]);
     }
     let mut out = Vec::new();
-    let mut push = |name: &str,
+    let mut push = |slot: &str,
+                    name: &str,
                     v4_set: bool,
                     time_v4: f64,
                     loss_v4: f64,
@@ -863,7 +884,10 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         if !v4_set && !v6_set {
             return;
         }
-        let mut item = serde_json::json!({ "name": name });
+        // `slot` is the stable probe key (cu/ct/cm): the latency
+        // chart joins server-side history (keyed by slot) against
+        // these items, so a probe rename keeps one continuous series.
+        let mut item = serde_json::json!({ "name": name, "slot": slot });
         if v4_set {
             item["v4"] = serde_json::json!({ "time": time_v4, "loss": loss_v4 });
         }
@@ -873,6 +897,7 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         out.push(item);
     };
     push(
+        "cu",
         &ping.cu_name,
         !ping.cu_addr.is_empty(),
         stat.time_10010,
@@ -882,6 +907,7 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         stat.ping_10010_v6,
     );
     push(
+        "ct",
         &ping.ct_name,
         !ping.ct_addr.is_empty(),
         stat.time_189,
@@ -891,6 +917,7 @@ fn ping_probes_json(ping: &crate::config::PingConfig, stat: &HostStat) -> serde_
         stat.ping_189_v6,
     );
     push(
+        "cm",
         &ping.cm_name,
         !ping.cm_addr.is_empty(),
         stat.time_10086,

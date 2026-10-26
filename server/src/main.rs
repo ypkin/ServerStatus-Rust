@@ -35,6 +35,7 @@ mod jinja;
 mod jwt;
 mod notifier;
 mod payload;
+mod ping_hist;
 mod registry;
 mod stats;
 mod traffic;
@@ -63,6 +64,11 @@ fn create_app_router() -> Router {
     Router::new()
         .route("/report", post(http::report))
         .route("/json/stats.json", get(http::get_stats_json)) // 兼容就旧主题
+        // Fork: server-side probe latency history for the main-panel
+        // latency chart. Public and read-only like /json/stats.json:
+        // the main panel is unauthenticated, so putting this behind
+        // admin auth would break the chart.
+        .route("/api/ping-history", get(http::get_ping_history))
         // .route("/config.pub.json", get(http::get_site_config_json)) // TODO
         .route("/api/admin/authorize", post(jwt::authorize))
         .route("/api/admin/traffic", get(admin::get_traffic))
@@ -151,6 +157,8 @@ async fn main() -> Result<(), anyhow::Error> {
     // fork: admin overrides + traffic accounting state (before mgr init)
     admin::init_admin_store();
     traffic::load_traffic();
+    // fork: probe latency history (same directory, same style)
+    ping_hist::load();
     // fork: pushplus runtime config (config.toml merged with admin.json)
     notifier::pushplus::apply_pushplus_config(admin::effective_pushplus());
 

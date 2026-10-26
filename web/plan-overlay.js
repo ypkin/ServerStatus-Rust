@@ -269,21 +269,25 @@
   }
 
   // --- Latency chart (batch 5, ported from Prism's detail drawer) ---
-  // Prism draws its latency chart from the panel's ping history; SSR has
-  // no server-side series, so the overlay samples the live stream itself
-  // (Prism's metrics-history approach: bucket live values, aggregate).
-  // Every stats refresh (30 s) appends one value per configured
-  // probe/stack into minute buckets; finalized minutes roll up into
-  // hourly buckets. Ranges 1h/6h/24h read minute buckets, 7d reads hourly
-  // buckets. History lives in memory only: closing the browser restarts
-  // it from scratch (the agreed behaviour, already told to the user).
+  // The chart reads server-side probe history (see ping_hist.rs):
+  // every client report is bucketed by the server into minute
+  // buckets (1h/6h/24h ranges) and hour buckets (7d), persisted in
+  // ping_history.json, so expanding a node draws its curve at once
+  // instead of waiting for the browser to sample points. History
+  // only exists from the deploy that introduced it; nothing older
+  // is backfilled or fabricated. Between fetches, the live tail
+  // below appends the current realtime value on each stats refresh
+  // (minute ranges only: mixing second-resolution tail points into
+  // the 7d hour series would shatter its line segments), and the
+  // next fetch replaces the tail with the server's own buckets.
   // Nothing is fabricated: a timeout (the client caps at 1000 ms, so
   // >= 1000 means the attempt timed out) is a null gap, and an
   // unmeasured stack contributes no point at all. Tooltip shows raw
   // bucket values, never the despiked/smoothed line (Prism's rule).
-  var latHist = {}; // name -> key -> {min:[[ts,val]...], hour:[[ts,val]...]}
-  var latPend = {}; // name -> key -> {min:{bucket,sum,n}, hour:{bucket,sum,n}}
-  var latLastSample = {}; // name -> ts
+  var latSrv = {}; // 'name|rangeHours' -> {slot: [[ts, ms]...]} fetched from /api/ping-history
+  var latSrvState = {}; // 'name|rangeHours' -> 'loading' | 'ready' | 'error'
+  var latLive = {}; // name -> key -> [[ts, ms]] live tail from stats refreshes
+  var latLiveTs = {}; // name -> ts of last live append (detail re-render key)
   var detailState = {}; // name -> {tab, range, despike, smooth}
 
   function detailStateFor(name) {
@@ -296,83 +300,93 @@
     if (v.time >= 1000 || v.loss >= 100) return null; // capped timeout
     return v.time > 0 ? v.time : undefined;
   }
-  function latPush(tier, bucket, val, cap) {
-    if (tier.length && tier[tier.length - 1][0] === bucket) { tier[tier.length - 1][1] = val; return; }
-    tier.push([bucket, val]);
-    while (tier.length > cap) tier.shift();
+  function latRangeParam(rangeHours) {
+    return rangeHours >= 168 ? '7d' : rangeHours <= 1 ? '1h' : rangeHours <= 6 ? '6h' : '24h';
   }
-  function latFinalizeMin(name, key, bucket, val) {
-    var h = latHist[name][key];
-    latPush(h.min, bucket, val, 1440);
-    var hb = Math.floor(bucket / 3600) * 3600;
-    var p = latPend[name][key].hour;
-    if (p.bucket !== hb) {
-      if (p.bucket !== 0) {
-        latPush(h.hour, p.bucket, p.n > 0 ? Math.round(p.sum / p.n) : null, 168);
-      }
-      p.bucket = hb; p.sum = 0; p.n = 0;
-    }
-    if (val !== null) { p.sum += val; p.n++; }
-  }
-  function sampleLatency(servers, nowSec) {
-    var minute = Math.floor(nowSec / 60) * 60;
-    servers.forEach(function (s) {
-      if (!latHist[s.name]) { latHist[s.name] = {}; latPend[s.name] = {}; }
-      (s.ping_probes || []).forEach(function (p) {
-        ['v4', 'v6'].forEach(function (stack) {
-          var val = latVal(p[stack]);
-          if (val === undefined) return;
-          var key = p.name + ' ' + stack;
-          if (!latHist[s.name][key]) {
-            latHist[s.name][key] = { min: [], hour: [] };
-            latPend[s.name][key] = { min: { bucket: 0, sum: 0, n: 0 }, hour: { bucket: 0, sum: 0, n: 0 } };
-          }
-          var pm = latPend[s.name][key].min;
-          if (pm.bucket !== minute) {
-            if (pm.bucket !== 0) {
-              latFinalizeMin(s.name, key, pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null);
-            }
-            pm.bucket = minute; pm.sum = 0; pm.n = 0;
-          }
-          if (val !== null) { pm.sum += val; pm.n++; }
-          latLastSample[s.name] = nowSec;
+  function latSrvKey(name, rangeHours) { return name + '|' + rangeHours; }
+  // Fetch server history for one node's range, then re-render the
+  // detail (the inject key gains a hist= segment, so the block
+  // redraws once the fetch lands). Deduped: a second call while
+  // loading or after success is a no-op; on error the chart shows
+  // a retry button instead of retrying in a loop.
+  function fetchLatHistory(name, rangeHours) {
+    var key = latSrvKey(name, rangeHours);
+    if (latSrvState[key] === 'loading' || latSrvState[key] === 'ready') return;
+    latSrvState[key] = 'loading';
+    fetch('/api/ping-history?host=' + encodeURIComponent(name) + '&range=' + latRangeParam(rangeHours), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var bySlot = {};
+        (j.probes || []).forEach(function (pr) {
+          bySlot[pr.slot] = (pr.points || []).map(function (pt) { return [pt[0], pt[1]]; });
         });
+        latSrv[key] = bySlot;
+        latSrvState[key] = 'ready';
+        inject();
+      })
+      .catch(function () {
+        latSrvState[key] = 'error';
+        inject();
+      });
+  }
+  // Live tail: append the current realtime probe values for an
+  // expanded node on each stats refresh. Points at or before the
+  // last server point are dropped when the series is built, so a
+  // later fetch never double-draws them.
+  function appendLatLive(srv, nowSec) {
+    var any = false;
+    (srv.ping_probes || []).forEach(function (p) {
+      ['v4', 'v6'].forEach(function (stack) {
+        var val = latVal(p[stack]);
+        if (val === undefined) return;
+        var key = p.name + ' ' + stack;
+        if (!latLive[srv.name]) latLive[srv.name] = {};
+        if (!latLive[srv.name][key]) latLive[srv.name][key] = [];
+        var tail = latLive[srv.name][key];
+        if (!tail.length || tail[tail.length - 1][0] !== nowSec) tail.push([nowSec, val]);
+        while (tail.length > 240) tail.shift();
+        any = true;
       });
     });
+    if (any) latLiveTs[srv.name] = nowSec;
   }
-  function latSeries(name, rangeHours) {
-    var now = Math.floor(Date.now() / 1000);
-    var from = now - rangeHours * 3600;
-    var hist = latHist[name] || {};
+  function latSeries(name, rangeHours, probes) {
+    // Series are built from the CONFIGURED probes (stats
+    // ping_probes), joined against fetched history by slot, so an
+    // unconfigured slot's stale series is never drawn and a
+    // configured probe with no history yet still yields an empty
+    // series (the chart's empty state, not a missing line). Display
+    // keys keep the current probe name, so a rename keeps one
+    // continuous series under the new name.
+    var srv = latSrv[latSrvKey(name, rangeHours)] || {};
     var out = [];
-    Object.keys(hist).forEach(function (key) {
-      var h = hist[key], pts;
-      if (rangeHours >= 168) {
-        pts = (h.hour || []).filter(function (p) { return p[0] >= from; });
-        var hb = Math.floor(now / 3600) * 3600;
-        var mins = (h.min || []).filter(function (p) { return p[0] >= hb && p[1] !== null; });
-        if (mins.length) {
-          var s = 0; mins.forEach(function (p) { s += p[1]; });
-          pts = pts.concat([[hb, Math.round(s / mins.length)]]);
+    (probes || []).forEach(function (p) {
+      ['v4', 'v6'].forEach(function (stack) {
+        if (!p[stack]) return;
+        var dispKey = p.name + ' ' + stack;
+        var pts = [];
+        if (p.slot) {
+          pts = (srv[p.slot + ':' + stack] || []).slice();
         }
-      } else {
-        pts = (h.min || []).filter(function (p) { return p[0] >= from; });
-        var pm = (latPend[name] && latPend[name][key]) ? latPend[name][key].min : null;
-        if (pm && pm.bucket >= from && pm.bucket > 0) {
-          pts = pts.concat([[pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null]]);
+        // Live tail on minute ranges only (see header comment).
+        if (rangeHours < 168) {
+          var live = (latLive[name] && latLive[name][dispKey]) || [];
+          live.forEach(function (lp) {
+            if (!pts.length || lp[0] > pts[pts.length - 1][0]) pts.push(lp);
+          });
         }
-      }
-      // Downsample to at most 360 points (Prism merges the same way).
-      if (pts.length > 360) {
-        var group = Math.ceil(pts.length / 360), merged = [];
-        for (var i = 0; i < pts.length; i += group) {
-          var slice = pts.slice(i, i + group), sum = 0, n = 0;
-          slice.forEach(function (p) { if (p[1] !== null) { sum += p[1]; n++; } });
-          merged.push([slice[0][0], n > 0 ? Math.round(sum / n) : null]);
+        // Downsample to at most 360 points (Prism merges the same way).
+        if (pts.length > 360) {
+          var group = Math.ceil(pts.length / 360), merged = [];
+          for (var i = 0; i < pts.length; i += group) {
+            var slice = pts.slice(i, i + group), sum = 0, n = 0;
+            slice.forEach(function (pp) { if (pp[1] !== null) { sum += pp[1]; n++; } });
+            merged.push([slice[0][0], n > 0 ? Math.round(sum / n) : null]);
+          }
+          pts = merged;
         }
-        pts = merged;
-      }
-      out.push({ key: key, points: pts });
+        out.push({ key: dispKey, points: pts });
+      });
     });
     return out;
   }
@@ -449,16 +463,41 @@
     return line;
   }
 
-  function latChart(name, st) {
+  function latChart(name, st, probes) {
     var wrap = document.createElement('div');
-    var series = latSeries(name, st.range);
+    // Server history is fetched on demand: expanding a node (or
+    // switching range) draws the curve as soon as the one fast
+    // round-trip lands, instead of waiting for samples to accrue.
+    var histKey = latSrvKey(name, st.range);
+    var histState = latSrvState[histKey];
+    if (histState !== 'ready') {
+      if (histState === 'error') {
+        var err = document.createElement('div');
+        err.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
+        err.textContent = '曲线加载失败：服务端历史接口未返回。';
+        wrap.appendChild(err);
+        var retry = document.createElement('button');
+        retry.textContent = '重试';
+        retry.style.cssText = 'border:1px solid #d1d5db;background:transparent;color:#374151;border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;margin-top:4px';
+        retry.addEventListener('click', function () { delete latSrvState[histKey]; fetchLatHistory(name, st.range); inject(); });
+        wrap.appendChild(retry);
+        return wrap;
+      }
+      if (histState !== 'loading') fetchLatHistory(name, st.range);
+      var loading = document.createElement('div');
+      loading.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
+      loading.textContent = '正在加载曲线…';
+      wrap.appendChild(loading);
+      return wrap;
+    }
+    var series = latSeries(name, st.range, probes);
     var hasData = series.some(function (s) { return s.points.some(function (p) { return p[1] !== null; }); });
     if (!hasData) {
       var empty = document.createElement('div');
       empty.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
       empty.textContent = (series.length === 0)
-        ? '未设置探针：在后台探针页填入地址并保存后，页面打开时开始采样画线。'
-        : '已有探针，暂无采样：保持页面打开，约 30 秒后开始出线。';
+        ? '未设置探针：在后台探针页填入地址并保存后，服务端开始记录，展开节点即可看到曲线。'
+        : '已有探针，暂无有效记录：服务端从部署起开始攒曲线，稍后回来就有曲线。';
       wrap.appendChild(empty);
       return wrap;
     }
@@ -631,7 +670,7 @@
 
   // Tabbed detail block (batch 5): summary row on top, then 网络延迟 /
   // 系统概览 tabs. The latency tab carries the live probe lines, the
-  // range + 削峰/平滑 controls and the sampled chart; the overview tab
+  // range + 削峰/平滑 controls and the server-history chart; the overview tab
   // carries detailLines (plan incl. end date, system, CPU, traffic,
   // boot, online, activity, version, public note) — probe lines live
   // only on the latency tab, so they are filtered out here defensively.
@@ -655,11 +694,7 @@
     if (st.tab === 'latency') {
       probeLines(srv).forEach(function (text) { block.appendChild(latLine(text)); });
       block.appendChild(latControls(srv.name, st));
-      block.appendChild(latChart(srv.name, st));
-      var note = document.createElement('div');
-      note.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:4px';
-      note.textContent = '曲线为浏览器实时采样：页面打开期间每 30 秒采一次实时值；关闭浏览器后历史从头采。7d 为小时均值。';
-      block.appendChild(note);
+      block.appendChild(latChart(srv.name, st, srv.ping_probes));
     } else {
       var probes = probeLines(srv);
       detailLines(srv).forEach(function (text) {
@@ -862,7 +897,8 @@
       var key = detailLines(srv).join('\n')
         + '|tab=' + st.tab + '|range=' + st.range
         + '|d=' + (st.despike ? 1 : 0) + '|s=' + (st.smooth ? 1 : 0)
-        + '|sample=' + (latLastSample[srv.name] || 0);
+        + '|hist=' + (latSrvState[latSrvKey(srv.name, st.range)] || 'none')
+        + '|live=' + (latLiveTs[srv.name] || 0);
       var block = reactTd.querySelector('[data-ssr-detail]');
       if (block) {
         if (block.getAttribute('data-ssr-key') === key) return;
@@ -949,8 +985,13 @@
         });
         planByName = map;
         haveStats = true;
-        // Batch 5: sample every node's probes for the latency chart.
-        sampleLatency(j.servers || [], Math.floor(Date.now() / 1000));
+        // Server history now feeds the chart; each refresh only
+        // appends a live tail point for expanded nodes, so the line
+        // keeps growing between history fetches.
+        var nowSec = Math.floor(Date.now() / 1000);
+        Object.keys(expanded).forEach(function (n) {
+          if (planByName[n]) appendLatLive(planByName[n], nowSec);
+        });
         renderPills();
         inject();
       })

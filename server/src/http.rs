@@ -30,6 +30,32 @@ pub async fn get_stats_json() -> impl IntoResponse {
     )
 }
 
+// Fork: server-side probe latency history for the main-panel chart.
+// Public and read-only, same as /json/stats.json (the main panel
+// has no login). Query: ?host=<name>&range=1h|6h|24h|7d.
+// 1h/6h/24h read minute buckets, 7d reads hour buckets. Unknown
+// hosts and bad ranges answer with an empty probe list (or the
+// 24 h default), never an error, so the chart just shows its
+// empty state.
+pub async fn get_ping_history(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let host = q.get("host").cloned().unwrap_or_default();
+    let range = q.get("range").cloned().unwrap_or_else(|| "24h".to_string());
+    let (week, window_secs) = ping_history_window(&range);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let probes = crate::ping_hist::query(&host, week, window_secs, now);
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        Json(json!({
+            "host": host,
+            "range": range,
+            "probes": probes,
+        })),
+    )
+}
+
 #[allow(unused)]
 pub fn get_site_config_json() -> impl IntoResponse {
     // TODO
@@ -469,4 +495,30 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
         })),
     )
         .into_response()
+}
+
+/// Range parameter for /api/ping-history: (hour buckets?, window secs).
+/// 1h/6h/24h read minute buckets, 7d reads hour buckets; anything
+/// else falls back to 24 h minute buckets.
+fn ping_history_window(range: &str) -> (bool, i64) {
+    match range {
+        "1h" => (false, 3600),
+        "6h" => (false, 6 * 3600),
+        "7d" => (true, 7 * 24 * 3600),
+        _ => (false, 24 * 3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_history_window_picks_tier() {
+        assert_eq!(ping_history_window("1h"), (false, 3600));
+        assert_eq!(ping_history_window("6h"), (false, 6 * 3600));
+        assert_eq!(ping_history_window("24h"), (false, 24 * 3600));
+        assert_eq!(ping_history_window("7d"), (true, 7 * 24 * 3600));
+        assert_eq!(ping_history_window("bogus"), (false, 24 * 3600));
+    }
 }
