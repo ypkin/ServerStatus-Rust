@@ -131,6 +131,20 @@ pub struct HostStat {
     #[serde(default)]
     pub bandwidth_mbps: u32,
 
+    // Fork: nezha-style display group tag (free text, backend-managed).
+    // Distinct from gid (auth/template membership): tag never affects
+    // auth, it only drives admin filtering and main-panel grouping.
+    #[serde(default)]
+    pub tag: String,
+    // Fork: public note, shown on main panel cards via the overlay.
+    #[serde(default)]
+    pub public_note: String,
+    // Fork: client-reported version (StatRequest.version, e.g. 1.8.2).
+    // Flows through the serde report conversion; empty for clients that
+    // do not report one, never fabricated.
+    #[serde(default)]
+    pub version: String,
+
     pub cpu: f64,
     pub memory_total: u64,
     pub memory_used: u64,

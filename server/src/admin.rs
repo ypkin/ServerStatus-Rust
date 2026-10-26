@@ -296,6 +296,8 @@ pub async fn get_hosts(_claims: jwt::Claims) -> impl IntoResponse {
             "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
             "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
             "bandwidth_mbps": h.bandwidth_mbps,
+            "tag": h.tag, "note": h.note, "public_note": h.public_note,
+            "weight": h.weight,
         }));
     }
     (StatusCode::OK, axum::Json(json!(out)))
@@ -504,6 +506,8 @@ fn host_json(h: &Host) -> Value {
         "traffic_limit": limit, "traffic_mode": mode, "monthstart": monthstart,
         "plan_start_date": h.plan_start_date, "annual_fee": h.annual_fee,
         "bandwidth_mbps": h.bandwidth_mbps,
+        "tag": h.tag, "note": h.note, "public_note": h.public_note,
+        "weight": h.weight,
     })
 }
 
@@ -537,6 +541,14 @@ pub struct HostCreateBody {
     pub annual_fee: Option<f64>,
     #[serde(default)]
     pub bandwidth_mbps: Option<u32>,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub public_note: String,
+    #[serde(default)]
+    pub weight: Option<u64>,
 }
 
 pub async fn post_host(
@@ -586,8 +598,11 @@ pub async fn post_host(
             plan_start_date: body.plan_start_date.clone(),
             annual_fee: body.annual_fee.unwrap_or(0.0),
             bandwidth_mbps: body.bandwidth_mbps.unwrap_or(0),
+            tag: body.tag.clone(),
+            note: body.note.clone(),
+            public_note: body.public_note.clone(),
             pos,
-            weight: 10000_u64.saturating_sub(pos as u64),
+            weight: body.weight.unwrap_or_else(|| 10000_u64.saturating_sub(pos as u64)),
             ..Default::default()
         };
         hosts.insert(host.name.clone(), host.clone());
@@ -637,6 +652,14 @@ pub struct HostUpdateBody {
     pub annual_fee: Option<f64>,
     #[serde(default)]
     pub bandwidth_mbps: Option<u32>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub public_note: Option<String>,
+    #[serde(default)]
+    pub weight: Option<u64>,
 }
 
 pub async fn put_host(
@@ -685,6 +708,10 @@ pub async fn put_host(
         if let Some(v) = body.plan_start_date { h.plan_start_date = v; }
         if let Some(v) = body.annual_fee { h.annual_fee = v; }
         if let Some(v) = body.bandwidth_mbps { h.bandwidth_mbps = v; }
+        if let Some(v) = body.tag { h.tag = v; }
+        if let Some(v) = body.note { h.note = v; }
+        if let Some(v) = body.public_note { h.public_note = v; }
+        if let Some(v) = body.weight { h.weight = v; }
         h.clone()
     };
     {

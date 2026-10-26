@@ -239,6 +239,17 @@ pub struct Host {
     /// Advertised bandwidth in Mbps, 0 = unset (fork).
     #[serde(default = "Default::default")]
     pub bandwidth_mbps: u32,
+    /// Display group tag, nezha-style free text (fork). Empty = Default
+    /// group. Unlike gid (auth/template membership), tag never affects
+    /// auth; it only drives admin filtering and main-panel grouping.
+    #[serde(default = "Default::default")]
+    pub tag: String,
+    /// Admin-only note, never sent to the main panel (fork).
+    #[serde(default = "Default::default")]
+    pub note: String,
+    /// Public note, shown on main panel cards via the overlay (fork).
+    #[serde(default = "Default::default")]
+    pub public_note: String,
 
     #[serde(skip_deserializing)]
     pub last_network_in: u64,
@@ -248,7 +259,7 @@ pub struct Host {
     // user data
     #[serde(skip_serializing, skip_deserializing)]
     pub pos: usize,
-    #[serde(default = "Default::default", skip_serializing)]
+    #[serde(default = "Default::default")]
     pub weight: u64,
     #[serde(default = "Default::default")]
     pub gid: String,

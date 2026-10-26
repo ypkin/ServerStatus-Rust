@@ -103,7 +103,11 @@ impl StatsMgr {
             map.retain(|name, _| !deleted_hosts.contains(name));
             for mut h in admin_hosts {
                 h.pos = map.values().map(|o| o.pos).max().unwrap_or(0) + 1;
-                h.weight = 10000_u64.saturating_sub(h.pos as u64);
+                // Weight persists once set via the admin form; only derive
+                // it for records that predate editable sort (weight 0).
+                if h.weight == 0 {
+                    h.weight = 10000_u64.saturating_sub(h.pos as u64);
+                }
                 if h.alias.is_empty() {
                     h.alias = h.name.clone();
                 }
@@ -216,6 +220,8 @@ impl StatsMgr {
                         stat_t.plan_start_date = info.plan_start_date.clone();
                         stat_t.annual_fee = info.annual_fee;
                         stat_t.bandwidth_mbps = info.bandwidth_mbps;
+                        stat_t.tag = info.tag.clone();
+                        stat_t.public_note = info.public_note.clone();
                         stat_t.traffic_mode = traffic_mode.clone();
                         let mut traffic_notify = false;
                         if stat_t.vnstat {
