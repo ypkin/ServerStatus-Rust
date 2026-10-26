@@ -21,6 +21,17 @@
     return (Math.round(v * 100) / 100) + 'GiB';
   }
 
+  // Units in stats.json (see client sys_info::sample): memory totals are
+  // KiB (bytes / 1024), disk totals are MB (calc_hdd_stats). The detail
+  // view divides by the same units, so the spec line must too — dividing
+  // by 2^30 as if they were bytes yields 0GiB for every real machine.
+  function fmtGiBFromKiB(kib) {
+    return (Math.round(kib / 1024 / 1024 * 100) / 100) + 'GiB';
+  }
+  function fmtGiBFromMB(mb) {
+    return (Math.round(mb / 1024 * 100) / 100) + 'GiB';
+  }
+
   function fmtFee(fee) {
     return '$' + (Math.round(fee * 100) / 100);
   }
@@ -43,8 +54,8 @@
     var si = s.sys_info || {};
     if (si.cpu_brand && si.cpu_num) parts.push(si.cpu_brand + ' × ' + si.cpu_num);
     else if (si.cpu_brand) parts.push(si.cpu_brand);
-    if (s.memory_total > 0) parts.push('内存 ' + fmtGiB(s.memory_total));
-    if (s.hdd_total > 0) parts.push('硬盘 ' + fmtGiB(s.hdd_total));
+    if (s.memory_total > 0) parts.push('内存 ' + fmtGiBFromKiB(s.memory_total));
+    if (s.hdd_total > 0) parts.push('硬盘 ' + fmtGiBFromMB(s.hdd_total));
     var os = [si.os_name, si.os_release, si.kernel_version].filter(Boolean).join(' ');
     if (os) parts.push(os);
     else if (si.os_name) parts.push(si.os_name);
