@@ -352,9 +352,12 @@ pub struct TrafficCorrectBody {
     pub month_tx: Option<u64>,
     pub total_rx: Option<u64>,
     pub total_tx: Option<u64>,
-    /// Fork: single "month used" value, split into rx/tx by the host's
-    /// billing mode (sum: half/half, up: all tx, down: all rx, max: both;
-    /// see traffic::split_month_used).
+    /// Fork: a single "month used" value, aligned to the host's metered
+    /// ("used") figure under its billing mode (up: tx, down: rx, max: the
+    /// larger side, sum: the sum). Unlike a plain split, alignment keeps
+    /// the unmetered direction's real history (up keeps rx, down keeps
+    /// tx); see traffic::align_used_to. Later reports accumulate on top
+    /// of the aligned baseline.
     pub month_used: Option<u64>,
 }
 
@@ -373,14 +376,24 @@ pub async fn put_host_traffic_correct(
             effective_host_settings(&name, &base)
         }
     };
-    // Single source of truth for the split is traffic::split_month_used.
-    // Do not inline another copy here: the previous inline version had
-    // up/down backwards (up put everything into rx), so under up/down
-    // modes a correction collapsed the billed figure to ~0 and looked
-    // like it "didn't take effect".
+    // The form's month_used is the USED baseline to align to, not a month
+    // sum to split: align it under the host's mode while preserving the
+    // unmetered direction (traffic::align_used_to). Do not go back to a
+    // plain split here: the previous split version replaced both
+    // directions (up wiped rx to 0), destroying real history, and an even
+    // earlier inline version had up/down backwards (up put everything
+    // into rx), so under up/down modes a correction collapsed the billed
+    // figure to ~0 and looked like it "didn't take effect".
     let (month_rx, month_tx) = match body.month_used {
         Some(v) => {
-            let (rx, tx) = crate::traffic::split_month_used(v, mode.as_str());
+            let (cur_rx, cur_tx) = {
+                let traffic = TRAFFIC.lock().unwrap();
+                match traffic.get(&name) {
+                    Some(st) => (st.month_rx, st.month_tx),
+                    None => (0, 0),
+                }
+            };
+            let (rx, tx) = crate::traffic::align_used_to(v, mode.as_str(), cur_rx, cur_tx);
             (Some(rx), Some(tx))
         }
         None => (body.month_rx, body.month_tx),

@@ -96,6 +96,29 @@ pub fn split_month_used(v: u64, traffic_mode: &str) -> (u64, u64) {
     }
 }
 
+/// Align the metered ("used") figure to `v` without destroying the
+/// unmetered direction's real history. Unlike `split_month_used` (which
+/// replaces both directions), this keeps the side the mode does not bill:
+/// up keeps rx and sets tx, down keeps rx's counterpart (sets rx, keeps
+/// tx), max sets the larger side to `v` (capping the smaller at `v` so the
+/// max is exactly `v`). Sum has no unmetered side, so it keeps the
+/// established half/half split. In every case `month_used` of the result
+/// equals `v` exactly.
+pub fn align_used_to(v: u64, traffic_mode: &str, cur_rx: u64, cur_tx: u64) -> (u64, u64) {
+    match traffic_mode {
+        "up" => (cur_rx, v),
+        "down" => (v, cur_tx),
+        "max" => {
+            if cur_rx >= cur_tx {
+                (v, cur_tx.min(v))
+            } else {
+                (cur_rx.min(v), v)
+            }
+        }
+        _ => (v / 2 + v % 2, v / 2),
+    }
+}
+
 /// First day of the billing period containing `today`, anchored on
 /// `reset_day` (1..=31, clamped to the month's length, e.g. 31 in February
 /// becomes the 28th/29th). Ported from monitor's `period_start`.
@@ -189,6 +212,25 @@ impl TrafficState {
         (d_rx, d_tx)
     }
 
+    /// All-time counters must cover the current period: traffic counted
+    /// in this period really happened, so it belongs in the all-time total
+    /// too. A month figure seeded or corrected above the accumulate
+    /// baseline (e.g. pre-panel history) would otherwise leave total below
+    /// month, and the admin form would show total < month. Returns true
+    /// when either total was raised. Never lowers a total.
+    pub fn cover_month_with_total(&mut self) -> bool {
+        let mut raised = false;
+        if self.total_rx < self.month_rx {
+            self.total_rx = self.month_rx;
+            raised = true;
+        }
+        if self.total_tx < self.month_tx {
+            self.total_tx = self.month_tx;
+            raised = true;
+        }
+        raised
+    }
+
     /// Admin correction (`set_traffic` semantics): the corrected month
     /// figures are stamped with the current period, otherwise the read side
     /// would answer them as zero and the next report would discard them.
@@ -212,6 +254,9 @@ impl TrafficState {
         self.month_rx = month_rx.unwrap_or(if self.month_start == period { self.month_rx } else { 0 });
         self.month_tx = month_tx.unwrap_or(if self.month_start == period { self.month_tx } else { 0 });
         self.month_start = period;
+        // Keep total >= month even when the month was aligned upward
+        // past everything accumulate has seen (see cover_month_with_total).
+        self.cover_month_with_total();
         // A correction lowers (or raises) usage: let the same alert crossing
         // announce again instead of staying silenced by the old step.
         self.alerted_step = 0;
@@ -245,7 +290,20 @@ pub fn load_traffic() {
     }
     match serde_json::from_str::<HashMap<String, TrafficState>>(&contents) {
         Ok(map) => {
-            *TRAFFIC.lock().unwrap() = map;
+            let mut guard = TRAFFIC.lock().unwrap();
+            *guard = map;
+            // Repair rows whose month was seeded or corrected above
+            // everything accumulate has seen (e.g. pre-panel history):
+            // without this, total stays below month until the next
+            // correction. Only raises totals, never lowers them.
+            let mut changed = false;
+            for st in guard.values_mut() {
+                changed |= st.cover_month_with_total();
+            }
+            drop(guard);
+            if changed {
+                save_traffic();
+            }
         }
         Err(e) => {
             error!("ignore invalid {TRAFFIC_FILE}: {e}");
@@ -339,6 +397,74 @@ mod tests {
             let (rx, tx) = split_month_used(100, mode);
             assert_eq!(month_used(rx, tx, mode), 100, "mode {mode}");
         }
+    }
+
+    #[test]
+    fn align_used_to_matches_metering_mode_and_preserves_other_side() {
+        // up: tx becomes v, rx untouched; down: mirror image.
+        assert_eq!(align_used_to(50_000, "up", 300, 700), (300, 50_000));
+        assert_eq!(align_used_to(50_000, "down", 300, 700), (50_000, 700));
+        // max: the larger side becomes v, the smaller is capped at v.
+        assert_eq!(align_used_to(50_000, "max", 300, 700), (300, 50_000));
+        assert_eq!(align_used_to(200, "max", 300, 700), (200, 200));
+        // sum: no unmetered side, keeps the half/half split.
+        assert_eq!(align_used_to(50_001, "sum", 300, 700), (25_001, 25_000));
+        // In every case the metered figure of the result equals v exactly.
+        for mode in ["up", "down", "max", "sum"] {
+            let (rx, tx) = align_used_to(50_000, mode, 300, 700);
+            assert_eq!(month_used(rx, tx, mode), 50_000, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn correct_raises_total_to_cover_month_and_never_lowers_it() {
+        // Mirrors cdt's live row: month seeded above everything
+        // accumulate has seen, so total < month before the fix.
+        let mut s = TrafficState::default();
+        s.month_rx = 27_718_162_800;
+        s.month_tx = 660_846_860;
+        s.total_rx = 998_911_716;
+        s.total_tx = 1_029_586_087;
+        s.month_start = "2026-10-20".to_string();
+        s.correct(None, None, None, None, 20, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(s.total_rx, 27_718_162_800);
+        assert_eq!(s.total_tx, 1_029_586_087);
+        assert!(s.total_rx + s.total_tx >= s.month_rx + s.month_tx);
+        // A later downward month correction must not shrink total.
+        s.correct(Some(100), Some(200), None, None, 20, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(s.total_rx, 27_718_162_800);
+        assert_eq!(s.total_tx, 1_029_586_087);
+    }
+
+    #[test]
+    fn align_used_survives_later_reports_and_keeps_total_above_month() {
+        // Mirrors the admin endpoint (align by mode, then correct)
+        // followed by three client reports (accumulate): the billed
+        // figure must stay at the aligned value plus only the metered
+        // direction's deltas, the unmetered direction must be preserved,
+        // and total must stay >= month throughout.
+        let mut s = TrafficState::default();
+        s.accumulate("b1/x", 1000, 2000, 14, at(2026, 10, 20), Some(1_700_000_000), 0);
+        s.accumulate("b1/x", 5000, 9000, 14, at(2026, 10, 20), Some(1_700_000_000), 1_700_001_000);
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 7000);
+        // Admin aligns used to 50_000 under "up": tx becomes 50_000,
+        // the real rx history (4000) is preserved, not wiped to 0.
+        let (rx, tx) = align_used_to(50_000, "up", s.month_rx, s.month_tx);
+        s.correct(Some(rx), Some(tx), None, None, 14, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 50_000);
+        assert_eq!(s.month_rx, 4000);
+        assert!(s.total_rx >= s.month_rx && s.total_tx >= s.month_tx);
+        // Three later reports, each adding (100 rx, 300 tx).
+        let mut last_rx = 5000u64;
+        let mut last_tx = 9000u64;
+        for _ in 0..3 {
+            last_rx += 100;
+            last_tx += 300;
+            s.accumulate("b1/x", last_rx, last_tx, 14, at(2026, 10, 26), Some(1_700_000_000), 1_700_002_000);
+        }
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 50_000 + 900);
+        assert_eq!(s.month_rx, 4000 + 300);
+        assert!(s.total_rx >= s.month_rx && s.total_tx >= s.month_tx);
     }
 
     #[test]

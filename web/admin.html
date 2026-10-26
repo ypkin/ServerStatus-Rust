@@ -95,7 +95,7 @@ label{display:inline-block;min-width:96px}
 
   <div id="view-traffic" class="view">
     <h2>流量设置与修正</h2>
-    <p class="hint">限额以 GiB 输入，接口以字节存储；修正会按当前计费模式把设定值拆进本月计数并盖当前周期戳，之后采集往上加。</p>
+    <p class="hint">限额以 GiB 输入，接口以字节存储；修正会把已用（按计费模式）对齐到设定值（另一方向的本月计数保留），并盖当前周期戳，之后采集往上加；总计会自动补到不小于本月。</p>
     <div id="traffic"></div>
   </div>
 
@@ -605,7 +605,7 @@ function showTrafficNode() {
   const gb = v => (v/GiB).toFixed(2);
   $('trafficDetail').innerHTML = '<table><tr><th>今日</th><th>本月</th><th>总计</th><th>已用（按计费模式）</th><th>限额</th></tr>'
     + '<tr><td>'+gb(row.day_rx+row.day_tx)+'</td><td>'+gb(row.month_rx+row.month_tx)+'</td><td>'+gb(row.total_rx+row.total_tx)+'</td><td>'+gb(row.month_used)+'</td><td>'+(isUnlimitedLimit(row.traffic_limit)?'不限量':gb(row.traffic_limit))+'</td></tr></table>'
-    + '<label>修正本月为 GiB</label><input id="traffic_corr" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correctSelected()">修正</button>';
+    + '<label>修正已用为 GiB</label><input id="traffic_corr" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correctSelected()">修正</button>';
 }
 async function correctSelected() {
   const name = $('traffic_node').value;
