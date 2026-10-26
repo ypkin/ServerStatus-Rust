@@ -588,7 +588,7 @@ pub fn country_code_for_country(name: &str) -> &'static str {
         "puerto rico" => "PR",
         "trinidad and tobago" => "TT",
         "barbados" => "BB",
-        "bahamas" => "BS",
+        "bahamas" | "the bahamas" => "BS",
         "bermuda" => "BM",
         "cayman islands" => "KY",
         "british virgin islands" | "virgin islands, british" => "VG",
@@ -625,7 +625,7 @@ pub fn country_code_for_country(name: &str) -> &'static str {
         "ireland" => "IE",
         "france" => "FR",
         "germany" => "DE",
-        "netherlands" => "NL",
+        "netherlands" | "the netherlands" => "NL",
         "belgium" => "BE",
         "luxembourg" => "LU",
         "switzerland" => "CH",
@@ -772,7 +772,7 @@ pub fn country_code_for_country(name: &str) -> &'static str {
         "guinea" => "GN",
         "guinea-bissau" => "GW",
         "senegal" => "SN",
-        "gambia" => "GM",
+        "gambia" | "the gambia" => "GM",
         "burkina faso" => "BF",
         "cape verde" | "cabo verde" => "CV",
         "sao tome and principe" => "ST",
@@ -869,6 +869,7 @@ mod country_tests {
         assert_eq!(country_code_for_country("United Kingdom"), "GB");
         assert_eq!(country_code_for_country("Singapore"), "SG");
         assert_eq!(country_code_for_country("France"), "FR");
+        assert_eq!(country_code_for_country("The Netherlands"), "NL");
         assert_eq!(country_code_for_country("  japan  "), "JP");
     }
 
