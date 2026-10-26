@@ -22,6 +22,7 @@ type Result<T> = std::result::Result<T, GenericError>;
 mod boot_id;
 mod geoip;
 mod grpc;
+mod icmp;
 mod status;
 mod sys_info;
 mod virt;

@@ -18,8 +18,10 @@ use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::icmp::{IcmpPinger, PingError};
 use crate::vnstat;
 use crate::Args;
+use stat_common::probe::normalize_probe_target;
 use stat_common::server_status::{DiskInfo, StatRequest};
 
 const SAMPLE_PERIOD: u64 = 1000; //ms
@@ -440,20 +442,86 @@ pub struct PingData {
     pub enabled: bool,
 }
 
-fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
-    let mut package_list: LinkedList<i32> = LinkedList::new();
-    let mut package_lost: u32 = 0;
+/// Rolling probe window. Semantics mirror the old inline code exactly:
+/// at most 100 samples, and loss only counts once more than 30 samples
+/// exist. Extracted so the timeout -> loss mapping is unit-testable.
+struct SampleWindow {
+    list: LinkedList<i32>,
+    lost: u32,
+}
+
+impl SampleWindow {
+    fn new() -> Self {
+        Self {
+            list: LinkedList::new(),
+            lost: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.list.clear();
+        self.lost = 0;
+    }
+
+    fn push(&mut self, ok: bool) {
+        if self.list.len() > 100 && self.list.pop_front().unwrap() == 0 {
+            self.lost -= 1;
+        }
+        if ok {
+            self.list.push_back(1);
+        } else {
+            self.lost += 1;
+            self.list.push_back(0);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn loss_rate(&self) -> u32 {
+        if self.list.is_empty() {
+            0
+        } else {
+            self.lost * 100 / u32::try_from(self.list.len()).unwrap_or(u32::MAX)
+        }
+    }
+}
+
+/// Resolve a bare probe host to an IP of the cell's family (v4/v6).
+/// The port is gone: ICMP pings a host, so resolution uses port 0.
+fn resolve_probe_host(host: &str, is_v6: bool) -> Option<std::net::IpAddr> {
+    (host, 0)
+        .to_socket_addrs()
+        .ok()?
+        .find(|a| a.is_ipv6() == is_v6)
+        .map(|a| a.ip())
+}
+
+/// Fork (ICMP probes): one echo sample per SAMPLE_PERIOD, TIMEOUT_MS
+/// timeout, same window/loss accounting as the old TCP-connect loop.
+/// A failed sample (timeout, unreachable, unresolvable, or no ICMP
+/// socket) counts as lost with `ping_time = TIMEOUT_MS`; a matched echo
+/// reply reports its real RTT. There is no TCP fallback anywhere here.
+fn start_ping_collect_t(data: &Arc<Mutex<PingData>>, is_v6: bool) {
+    let mut window = SampleWindow::new();
 
     let ping_data = data.clone();
     thread::spawn(move || {
         let mut cached_uri = String::new();
-        let mut cached_addr: Option<std::net::SocketAddr> = None;
+        let mut cached_target: Option<std::net::IpAddr> = None;
+        let mut cached_pinger: Option<IcmpPinger> = None;
+        let mut pinger_error_logged = false;
+        let mut seq: u16 = 0;
         loop {
             let (uri, enabled) = {
                 let o = ping_data.lock().unwrap();
                 (o.probe_uri.clone(), o.enabled)
             };
-            if !enabled || uri.is_empty() {
+            // Stored values may still carry a TCP-era port (or a CLI
+            // default with one); ICMP pings the bare host.
+            let target_str = normalize_probe_target(&uri);
+            if !enabled || target_str.is_empty() {
                 // Fork (batch 3, probe consistency): an idle cell must
                 // report nothing, not the last measurement from before
                 // the server emptied/disabled this probe. Without this
@@ -465,31 +533,32 @@ fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
                     o.ping_time = 0;
                     o.lost_rate = 0;
                 }
-                package_list.clear();
-                package_lost = 0;
+                window.clear();
+                cached_uri.clear();
+                cached_target = None;
+                cached_pinger = None;
+                pinger_error_logged = false;
                 thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
                 continue;
             }
             // Re-resolve whenever the server pushed a new probe address.
-            if cached_uri != uri || cached_addr.is_none() {
-                match uri.to_socket_addrs().ok().and_then(|mut it| it.next()) {
-                    Some(addr) => {
-                        info!("{} => {:?}", uri, addr);
+            if cached_uri != uri || cached_target.is_none() {
+                match resolve_probe_host(&target_str, is_v6) {
+                    Some(ip) => {
+                        info!("{} => {:?}", target_str, ip);
                         cached_uri = uri.clone();
-                        cached_addr = Some(addr);
+                        cached_target = Some(ip);
+                        cached_pinger = None;
+                        pinger_error_logged = false;
                     }
                     None => {
                         // Unresolvable probe: count a lost sample, retry
                         // next round instead of probing a stale address.
-                        if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
-                            package_lost -= 1;
-                        }
-                        package_lost += 1;
-                        package_list.push_back(0);
+                        window.push(false);
                         if let Ok(mut o) = ping_data.lock() {
                             o.ping_time = TIMEOUT_MS as u32;
-                            if package_list.len() > 30 {
-                                o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
+                            if window.len() > 30 {
+                                o.lost_rate = window.loss_rate();
                             }
                         }
                         thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
@@ -497,33 +566,65 @@ fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
                     }
                 }
             }
-            let addr = cached_addr.unwrap();
-
-            if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
-                package_lost -= 1;
-            }
-
-            let instant = Instant::now();
-            match TcpStream::connect_timeout(&addr, Duration::from_millis(TIMEOUT_MS)) {
-                Ok(s) => {
-                    let _ = s.shutdown(Shutdown::Both);
-                    package_list.push_back(1);
-                }
-                Err(e) => {
-                    if e.kind() == ConnectionRefused {
-                        package_list.push_back(1);
-                    } else {
-                        package_lost += 1;
-                        package_list.push_back(0);
+            if cached_pinger.is_none() {
+                match IcmpPinger::new(cached_target.unwrap()) {
+                    Ok(p) => {
+                        info!(
+                            "ICMP probe {} => {:?} via {:?} socket",
+                            target_str,
+                            cached_target.unwrap(),
+                            p.method
+                        );
+                        cached_pinger = Some(p);
+                    }
+                    Err(e) => {
+                        // Loud, not silent: without an ICMP socket this
+                        // cell cannot measure anything, and falling back
+                        // to TCP would resurrect the port-dependent
+                        // numbers this change removed.
+                        if !pinger_error_logged {
+                            error!(
+                                "ICMP probe {target_str}: cannot open ICMP socket ({e}); counting samples as lost, no TCP fallback"
+                            );
+                            pinger_error_logged = true;
+                        }
+                        window.push(false);
+                        if let Ok(mut o) = ping_data.lock() {
+                            o.ping_time = TIMEOUT_MS as u32;
+                            if window.len() > 30 {
+                                o.lost_rate = window.loss_rate();
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                        continue;
                     }
                 }
             }
-            let time_cost_ms = instant.elapsed().as_millis();
-
-            if let Ok(mut o) = ping_data.lock() {
-                o.ping_time = u32::try_from(time_cost_ms).unwrap_or(u32::MAX);
-                if package_list.len() > 30 {
-                    o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
+            let pinger = cached_pinger.as_ref().unwrap();
+            seq = seq.wrapping_add(1);
+            match pinger.ping(seq, Duration::from_millis(TIMEOUT_MS)) {
+                Ok(rtt) => {
+                    window.push(true);
+                    if let Ok(mut o) = ping_data.lock() {
+                        o.ping_time = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
+                        if window.len() > 30 {
+                            o.lost_rate = window.loss_rate();
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Timeouts are routine (a filtered target costs one
+                    // per sample); anything else is worth a debug line.
+                    if let PingError::Io(ref io_err) = e {
+                        debug!("ICMP probe {target_str}: recv error {io_err}");
+                    }
+                    window.push(false);
+                    if let Ok(mut o) = ping_data.lock() {
+                        o.ping_time = TIMEOUT_MS as u32;
+                        if window.len() > 30 {
+                            o.lost_rate = window.loss_rate();
+                        }
+                    }
                 }
             }
 
@@ -558,6 +659,11 @@ pub fn apply_ping_config(
     let apply = |cell: &OnceCell<Arc<Mutex<PingData>>>, addr: &str| {
         if let Some(data) = cell.get() {
             if let Ok(mut o) = data.lock() {
+                // Normalize on receipt too: a stored TCP-era value (or
+                // an old server) may still carry a port; the probe
+                // thread re-normalizes as well, this keeps the stored
+                // URI itself a bare host.
+                let addr = normalize_probe_target(addr);
                 // A changed target, a disabled probe, or an emptied
                 // address must not keep showing the previous target's
                 // numbers: reset so the next report reads 0 until fresh
@@ -569,7 +675,7 @@ pub fn apply_ping_config(
                 if enabled {
                     // Authoritative overwrite: empty idles the cell,
                     // non-empty points it at the new address.
-                    o.probe_uri = addr.to_string();
+                    o.probe_uri = addr.clone();
                 }
                 if !enabled || addr.is_empty() || changed {
                     o.ping_time = 0;
@@ -597,9 +703,11 @@ pub static G_PING_10086_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 
 pub fn start_all_ping_collect_t(args: &Args) {
     let ping_enabled = !args.disable_ping;
+    // CLI defaults still carry TCP-era ports (cu.tz.cloudcpp.com:80);
+    // normalize to bare hosts, same as server-pushed values.
     G_PING_10010
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.cu_addr.clone(),
+            probe_uri: normalize_probe_target(&args.cu_addr),
             lost_rate: 0,
             ping_time: 0,
             enabled: ping_enabled,
@@ -607,7 +715,7 @@ pub fn start_all_ping_collect_t(args: &Args) {
         .unwrap();
     G_PING_189
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.ct_addr.clone(),
+            probe_uri: normalize_probe_target(&args.ct_addr),
             lost_rate: 0,
             ping_time: 0,
             enabled: ping_enabled,
@@ -615,7 +723,7 @@ pub fn start_all_ping_collect_t(args: &Args) {
         .unwrap();
     G_PING_10086
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.cm_addr.clone(),
+            probe_uri: normalize_probe_target(&args.cm_addr),
             lost_rate: 0,
             ping_time: 0,
             enabled: ping_enabled,
@@ -649,12 +757,12 @@ pub fn start_all_ping_collect_t(args: &Args) {
         .unwrap();
 
     if !args.disable_ping {
-        start_ping_collect_t(G_PING_10010.get().unwrap());
-        start_ping_collect_t(G_PING_189.get().unwrap());
-        start_ping_collect_t(G_PING_10086.get().unwrap());
-        start_ping_collect_t(G_PING_10010_V6.get().unwrap());
-        start_ping_collect_t(G_PING_189_V6.get().unwrap());
-        start_ping_collect_t(G_PING_10086_V6.get().unwrap());
+        start_ping_collect_t(G_PING_10010.get().unwrap(), false);
+        start_ping_collect_t(G_PING_189.get().unwrap(), false);
+        start_ping_collect_t(G_PING_10086.get().unwrap(), false);
+        start_ping_collect_t(G_PING_10010_V6.get().unwrap(), true);
+        start_ping_collect_t(G_PING_189_V6.get().unwrap(), true);
+        start_ping_collect_t(G_PING_10086_V6.get().unwrap(), true);
     }
 }
 
@@ -764,6 +872,29 @@ mod tests {
             classify_v4(Ipv4Addr::new(192, 0, 2, 1)),
             V4Class::Skip
         );
+    }
+
+    #[test]
+    fn sample_window_timeout_maps_to_loss() {
+        // Mirrors the probe loop: a failed sample (timeout, unreachable,
+        // unresolvable, no ICMP socket) pushes a 0 and counts as lost;
+        // loss only reports once more than 30 samples exist.
+        let mut w = SampleWindow::new();
+        for _ in 0..30 {
+            w.push(true);
+        }
+        assert_eq!(w.loss_rate(), 0);
+        // 31st sample fails: window > 30, loss = 1/31 -> 3%.
+        w.push(false);
+        assert_eq!(w.len(), 31);
+        assert_eq!(w.loss_rate(), 3);
+        // Window caps at 101 entries (pop once len > 100, before push).
+        for _ in 0..200 {
+            w.push(true);
+        }
+        assert_eq!(w.len(), 101);
+        // The single early loss has been pushed out by now.
+        assert_eq!(w.loss_rate(), 0);
     }
 
     #[test]

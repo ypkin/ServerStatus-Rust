@@ -120,7 +120,11 @@ impl PingConfig {
     /// Clone with every IPv4 key (legacy + explicit) set to the effective
     /// IPv4 address, so API responses never disagree between the two
     /// spellings, and with empty display names reset to the carrier
-    /// defaults. IPv6 addresses pass through untouched.
+    /// defaults. Every address is additionally stripped to its bare host
+    /// (port and v6 brackets removed): ICMP probes ping hosts, and this
+    /// is what makes old TCP-era saved values keep working without
+    /// re-entry, both at save time (`put_ping`) and at send time
+    /// (`effective_ping` feeds gRPC and HTTP /report).
     pub fn normalized(&self) -> Self {
         let mut p = self.clone();
         p.cu_addr = self.v4_cu().to_string();
@@ -129,6 +133,19 @@ impl PingConfig {
         p.ct_addr_v4 = p.ct_addr.clone();
         p.cm_addr = self.v4_cm().to_string();
         p.cm_addr_v4 = p.cm_addr.clone();
+        for addr in [
+            &mut p.cu_addr,
+            &mut p.cu_addr_v4,
+            &mut p.ct_addr,
+            &mut p.ct_addr_v4,
+            &mut p.cm_addr,
+            &mut p.cm_addr_v4,
+            &mut p.cu_addr_v6,
+            &mut p.ct_addr_v6,
+            &mut p.cm_addr_v6,
+        ] {
+            *addr = stat_common::probe::normalize_probe_target(addr);
+        }
         if p.cu_name.is_empty() {
             p.cu_name = default_ping_cu_name();
         }
@@ -181,8 +198,9 @@ mod ping_tests {
         assert_eq!(legacy.v4_cu(), "a:80");
         assert!(legacy.cu_addr_v6.is_empty());
         let n = legacy.normalized();
-        assert_eq!(n.cu_addr, "a:80");
-        assert_eq!(n.cu_addr_v4, "a:80");
+        // ICMP era: the TCP-era port is stripped at normalization.
+        assert_eq!(n.cu_addr, "a");
+        assert_eq!(n.cu_addr_v4, "a");
         assert_eq!(n.cu_name, "联通");
     }
 
@@ -190,12 +208,31 @@ mod ping_tests {
     fn explicit_v4_wins_and_normalized_agrees() {
         let mut p = PingConfig::default();
         p.cu_addr_v4 = "10.0.0.1:80".to_string();
-        p.cu_addr_v6 = "2001:db8::1:80".to_string();
+        p.cu_addr_v6 = "[2001:db8::1]:80".to_string();
         assert_eq!(p.v4_cu(), "10.0.0.1:80");
         let n = p.normalized();
-        assert_eq!(n.cu_addr, "10.0.0.1:80");
-        assert_eq!(n.cu_addr_v4, "10.0.0.1:80");
-        assert_eq!(n.cu_addr_v6, "2001:db8::1:80");
+        assert_eq!(n.cu_addr, "10.0.0.1");
+        assert_eq!(n.cu_addr_v4, "10.0.0.1");
+        assert_eq!(n.cu_addr_v6, "2001:db8::1");
+    }
+
+    #[test]
+    fn normalized_strips_ports_on_all_six_targets() {
+        let mut p = PingConfig::default();
+        p.cu_addr = "cuccv4.passall.us:8443".to_string();
+        p.ct_addr = "ct.example.com:80".to_string();
+        p.cm_addr = "cm.tz.cloudcpp.com:80".to_string();
+        p.cu_addr_v6 = "cuccv6.passall.us:8443".to_string();
+        p.ct_addr_v6 = String::new();
+        p.cm_addr_v6 = "op2.passall.us:8443".to_string();
+        let n = p.normalized();
+        assert_eq!(n.cu_addr, "cuccv4.passall.us");
+        assert_eq!(n.cu_addr_v4, "cuccv4.passall.us");
+        assert_eq!(n.ct_addr, "ct.example.com");
+        assert_eq!(n.cm_addr, "cm.tz.cloudcpp.com");
+        assert_eq!(n.cu_addr_v6, "cuccv6.passall.us");
+        assert_eq!(n.ct_addr_v6, "");
+        assert_eq!(n.cm_addr_v6, "op2.passall.us");
     }
 
     #[test]

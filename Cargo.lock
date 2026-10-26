@@ -2817,6 +2817,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "socket2",
  "stat_common",
  "sysinfo",
  "tokio",

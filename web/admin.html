@@ -108,20 +108,20 @@ label{display:inline-block;min-width:96px}
       <div style="min-width:760px">
         <div style="font-weight:bold;margin:12px 0 4px">IPv4</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-          <div style="display:flex;gap:6px"><input id="ping_name_cu_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4:80 或域名:80"></div>
-          <div style="display:flex;gap:6px"><input id="ping_name_ct_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4:80 或域名:80"></div>
-          <div style="display:flex;gap:6px"><input id="ping_name_cm_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4:80 或域名:80"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cu_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_ct_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cm_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
         </div>
         <div style="font-weight:bold;margin:12px 0 4px">IPv6</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-          <div style="display:flex;gap:6px"><input id="ping_name_cu_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 [2400::1]:80 或域名:80"></div>
-          <div style="display:flex;gap:6px"><input id="ping_name_ct_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 [2400::1]:80 或域名:80"></div>
-          <div style="display:flex;gap:6px"><input id="ping_name_cm_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 [2400::1]:80 或域名:80"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cu_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_ct_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cm_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
         </div>
       </div>
       </div>
       <button onclick="savePingAll()" style="margin-top:12px">保存探针设置</button>
-      <p class="hint">名称和地址都由你定；地址空着就是没设置，不测也不显示。IPv6 留空表示该运营商不测 v6。格式：IP 或域名加端口，如 1.2.3.4:80；IPv6 地址要加方括号，如 [2400::1]:80；不要带 http:// 这类协议头；只填 IP 不带端口会解析失败、一直显示 100% 丢包。</p>
+      <p class="hint">名称和地址都由你定；地址空着就是没设置，不测也不显示。IPv6 留空表示该运营商不测 v6。探针是 ICMP ping，只测到主机的往返：填纯域名或 IP 即可，端口不再需要（带端口会被忽略）；不要带 http:// 这类协议头；IPv6 地址加不加方括号都行。</p>
     </div>
     <h2>探针总览（v4/v6 实测值）</h2>
     <div class="card">
