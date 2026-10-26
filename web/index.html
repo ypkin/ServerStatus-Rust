@@ -16,12 +16,15 @@
     <script defer="defer" src="/static/js/main.32884401.js"></script>
     <!-- Fork overlay: Tag pills + expandable node details (see plan-overlay.js).
          Native script, no React rebuild; served from the same embedded web/.
-         Bump ?v= on EVERY plan-overlay.js change: browsers cache the old
-         script otherwise (batch 3: a stale cached copy kept showing 0GiB
-         after the server already served the fixed one; batch 4: a stale
-         pre-v7 copy kept showing in-cell detail + NaN boot time;
-         batch 5: tabbed Prism-ported detail). -->
-    <script defer="defer" src="/plan-overlay.js?v=12"></script>
+         PATH-VERSIONED filename (plan-overlay-vNN.js), NOT ?v=: this zone's
+         edge cache ignores query strings — ?v=10 served v7 bytes and ?v=12
+         served v7 bytes too, while a fresh path is a guaranteed cache MISS
+         that fetches the correct file from origin. On EVERY overlay change:
+         copy plan-overlay.js to plan-overlay-vNN.js (N+1) and point this
+         script tag at the new file. The unversioned plan-overlay.js stays
+         embedded (same content) so old cached HTML still gets a working
+         script instead of a 404. -->
+    <script defer="defer" src="/plan-overlay-v12.js"></script>
     <link href="/static/css/main.479df68b.css" rel="stylesheet">
 </head>
 
