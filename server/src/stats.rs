@@ -295,7 +295,10 @@ impl StatsMgr {
                             stat_t.last_network_in = stat_t.network_in.saturating_sub(st.month_rx);
                             stat_t.last_network_out = stat_t.network_out.saturating_sub(st.month_tx);
                             // Deduped allowance alert (monitor model).
-                            if traffic_limit > 0 {
+                            // Unlimited nodes (0, or 9999 GiB from the
+                            // admin form) never alert: there is no quota
+                            // to cross.
+                            if !crate::traffic::is_unlimited(traffic_limit) {
                                 let used = crate::traffic::month_used(st.month_rx, st.month_tx, &traffic_mode);
                                 let step = crate::traffic::TrafficState::alert_step(
                                     used,
@@ -312,7 +315,7 @@ impl StatsMgr {
                             }
                         }
                         stat_t.month_used = crate::traffic::month_used(stat_t.month_rx, stat_t.month_tx, &traffic_mode);
-                        stat_t.traffic_percent = if traffic_limit > 0 {
+                        stat_t.traffic_percent = if !crate::traffic::is_unlimited(traffic_limit) {
                             (stat_t.month_used as u128 * 100 / traffic_limit as u128) as u64
                         } else {
                             0

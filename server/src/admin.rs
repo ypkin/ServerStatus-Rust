@@ -193,7 +193,7 @@ pub fn effective_pushplus() -> crate::notifier::pushplus::Config {
 
 fn traffic_summary(name: &str, alias: &str, limit: u64, mode: &str, monthstart: u32, st: &TrafficState) -> Value {
     let used = month_used(st.month_rx, st.month_tx, mode);
-    let percent = if limit > 0 { (used as u128 * 100 / limit as u128) as u64 } else { 0 };
+    let percent = if !crate::traffic::is_unlimited(limit) { (used as u128 * 100 / limit as u128) as u64 } else { 0 };
     json!({
         "name": name,
         "alias": alias,

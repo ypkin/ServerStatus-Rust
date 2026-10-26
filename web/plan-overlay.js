@@ -125,13 +125,20 @@
     return ' (' + (Math.round(used / total * 1000) / 10) + '%)';
   }
 
+  // Unlimited traffic spellings: 0 (old) and 9999 GiB (admin form).
+  // 9999 must never render as a quota (see traffic::is_unlimited).
+  function isUnlimitedTraffic(bytes) {
+    return !bytes || Math.round(bytes / GiB) === 9999;
+  }
+
   function planLine(s) {
     var parts = [];
     if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
     if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee, s.currency));
     if (s.bandwidth_mbps > 0) parts.push('带宽 ' + fmtBw(s.bandwidth_mbps));
-    if (s.traffic_limit > 0) parts.push('限额 ' + fmtGiB(s.traffic_limit));
-    else if (parts.length > 0) parts.push('限额不限量');
+    if (isUnlimitedTraffic(s.traffic_limit)) {
+      if (parts.length > 0) parts.push('限额不限量');
+    } else parts.push('限额 ' + fmtGiB(s.traffic_limit));
     return parts.length ? '套餐：' + parts.join(' · ') : '套餐：—';
   }
 
@@ -196,7 +203,7 @@
     tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
     tParts.push('本月已用 ' + fmtGiB(s.month_used));
     tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
-    tParts.push(s.traffic_limit > 0 ? '限额 ' + fmtGiB(s.traffic_limit) : '限额不限量');
+    tParts.push(isUnlimitedTraffic(s.traffic_limit) ? '限额不限量' : '限额 ' + fmtGiB(s.traffic_limit));
     lines.push('流量：' + tParts.join(' · '));
     lines.push('负载：' + s.load_1 + ' / ' + s.load_5 + ' / ' + s.load_15);
     lines.push('进程：' + s.process_count);

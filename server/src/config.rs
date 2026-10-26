@@ -271,7 +271,9 @@ pub struct Host {
     pub disabled: bool,
     #[serde(default = "Default::default")]
     pub labels: String,
-    /// Traffic allowance in bytes, 0 = unlimited (fork, monitor model).
+    /// Traffic allowance in bytes, 0 = unlimited (fork, monitor model);
+    /// 9999 GiB is a second unlimited spelling from the admin form
+    /// (see traffic::is_unlimited) and must never be read as a quota.
     #[serde(default = "Default::default")]
     pub traffic_limit: u64,
     /// Metering mode: sum | up | down | max (fork, default sum).
