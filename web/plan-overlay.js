@@ -4,7 +4,10 @@
 // The React table renders one row per server; the first cell holds the
 // display name (alias, falling back to the node name) inside a truncated
 // div. Clicking the name cell expands React's own detail row under it;
-// the overlay appends a tabbed detail block inside that wide row: a
+// the overlay appends a tabbed detail block inside that wide row
+// while hiding React's own centered detail block there (the user
+// asked to delete the native load/memory/swap/disk/TCP/UDP/latency
+// block and keep only the overlay block): a
 // node summary line, then 网络延迟 / 系统概览 tabs. The latency tab
 // carries the live probe lines plus a Prism-ported chart (1h/6h/24h/7d
 // ranges, 削峰/平滑 toggles, one line per user-named probe, v4/v6
@@ -677,6 +680,26 @@
     });
   }
 
+  // Hide React's own expanded detail block (the centered load/memory/
+  // swap/disk/TCP/UDP/latency block plus its #0/icon tail): the user
+  // asked to delete that part and keep only the overlay's tabbed
+  // block. The native nodes live in the same single colspan td as our
+  // block, so hide every direct child of the td except
+  // [data-ssr-detail] — no reliance on the native block's internal
+  // structure, so the #0/icon tail is hidden too. This runs on EVERY
+  // inject pass, open or collapsed: React recreates the native nodes
+  // on refresh, so a once-only hide would let them resurrect.
+  // Style-only changes do not trip the MutationObserver loop (it
+  // watches childList only), and the expand row itself is never
+  // touched, so expand/collapse keeps working.
+  function hideNativeDetail(reactTd) {
+    if (!reactTd) return;
+    Array.prototype.slice.call(reactTd.children).forEach(function (el) {
+      if (el.getAttribute && el.getAttribute('data-ssr-detail') != null) return;
+      if (el.style && el.style.display !== 'none') el.style.display = 'none';
+    });
+  }
+
   function inject() {
     var names = Object.keys(planByName);
     if (!names.length) return;
@@ -725,6 +748,11 @@
           reactOpen = /(^|\s)visible(\s|$)/.test(expandRow.className || '');
         }
       }
+      // Hide React's native detail block on every pass (see
+      // hideNativeDetail): pre-hiding while collapsed means no flash
+      // of the native block between a click and the next inject, and
+      // a React re-render can never resurrect it.
+      hideNativeDetail(reactTd);
       var open = reactOpen || !!expanded[srv.name];
       // Drop lines injected by the pre-fold overlay version, if any.
       Array.prototype.slice.call(td.querySelectorAll('[data-ssr-kind]')).forEach(function (el) { el.remove(); });
@@ -775,9 +803,10 @@
         }
       }
       // Detail block (batch 5, Prism port): the tabbed block lives
-      // INSIDE React's own expanded row — the wide centered detail
-      // block (load/memory/swap/disk/TCP/UDP/latency) — appended at
-      // the end of its single colspan td. No table row or cell of
+      // INSIDE React's own expanded row — appended at the end of its
+      // single colspan td, while React's own centered detail block
+      // in the same td is hidden by hideNativeDetail above, so only
+      // the overlay block shows. No table row or cell of
       // our own: batch 3's separate full-width row is gone, and
       // nothing is ever crammed into the narrow name cell again.
       // React wipes foreign DOM on refresh, so the block is
