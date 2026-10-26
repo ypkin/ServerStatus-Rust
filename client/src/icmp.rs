@@ -8,9 +8,16 @@
 //! Socket strategy, in order:
 //! 1. `SOCK_DGRAM` with `IPPROTO_ICMP`/`IPPROTO_ICMPV6` (the kernel "ping"
 //!    socket: no privilege needed where `ping_group_range` allows it,
-//!    and the kernel handles checksums and the IP header).
+//!    and the kernel handles checksums and the IP header). The socket
+//!    is bound to its identifier before connect: an unbound ping socket
+//!    lets the kernel pick (and, on some kernels such as
+//!    5.15.0-oracle, rewrite) the identifier, so the reply ident no
+//!    longer matches the sent ident and every sample times out with no
+//!    error. A bound ping socket keeps the ident it was bound to.
 //! 2. `SOCK_RAW` with the same protocol (needs `CAP_NET_RAW`, which the
-//!    client has: every fleet service file runs it as root).
+//!    client has: every fleet service file runs it as root). Raw
+//!    sockets are left unbound: the kernel does not rewrite the ident
+//!    on raw sockets.
 //! If both fail, the caller logs once per target and counts the sample
 //! as lost. There is intentionally NO fallback to TCP connect: a
 //! port-dependent result is exactly the misleading data this module
@@ -20,6 +27,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
 use std::mem::MaybeUninit;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 /// How the socket was obtained, for the one-time startup log line.
@@ -92,8 +100,35 @@ pub struct IcmpPinger {
     pub method: SocketMethod,
 }
 
+/// Process-wide ident dispenser. Every live pinger needs a distinct
+/// identifier: two DGRAM ping sockets bound to the same ident conflict
+/// (the second bind fails with AddrInUse), and the kernel routes
+/// replies by ident, so a shared ident would also mix cells' replies.
+/// Seeded from the pid (the old behavior for the first pinger) and
+/// incremented per pinger; 0 is skipped because bind port 0 means
+/// "kernel assigns", which is exactly the failure this fixes. One
+/// live pinger per probe cell, so per-pinger uniqueness implies
+/// per-cell uniqueness.
+static IDENT_SEQ: AtomicU16 = AtomicU16::new(0);
+
+fn next_ident() -> u16 {
+    let base = std::process::id() as u16;
+    loop {
+        let ident = base.wrapping_add(IDENT_SEQ.fetch_add(1, Ordering::Relaxed));
+        if ident != 0 {
+            return ident;
+        }
+    }
+}
+
 impl IcmpPinger {
     /// Open a socket for `target`, preferring DGRAM over RAW.
+    ///
+    /// DGRAM sockets are bound to their identifier before connect (see
+    /// the module docs for why: unbound ping sockets get their ident
+    /// rewritten on some kernels). Each attempt uses a fresh ident;
+    /// an AddrInUse bind (another process holding that ident) retries
+    /// with the next one. RAW sockets are left unbound, as before.
     pub fn new(target: IpAddr) -> io::Result<Self> {
         let is_v6 = target.is_ipv6();
         let (domain, proto) = if is_v6 {
@@ -101,25 +136,60 @@ impl IcmpPinger {
         } else {
             (Domain::IPV4, Protocol::ICMPV4)
         };
-        let (socket, method, no_ip_header) = match Socket::new(domain, Type::DGRAM, Some(proto)) {
-            Ok(s) => (s, SocketMethod::Dgram, true),
-            Err(dgram_err) => match Socket::new(domain, Type::RAW, Some(proto)) {
-                Ok(s) => (s, SocketMethod::Raw, is_v6),
-                Err(_) => return Err(dgram_err),
-            },
-        };
-        // Connect so send/recv need no address each round and incoming
-        // packets are filtered to this peer; it also pins the source
-        // address used for the v6 pseudo-header checksum.
-        socket.connect(&SockAddr::from(std::net::SocketAddr::new(target, 0)))?;
-        Ok(Self {
-            socket,
-            target,
-            is_v6,
-            no_ip_header,
-            ident: std::process::id() as u16,
-            method,
-        })
+        let mut dgram_err: Option<io::Error> = None;
+        for _ in 0..8 {
+            let ident = next_ident();
+            match Socket::new(domain, Type::DGRAM, Some(proto)) {
+                Ok(s) => {
+                    let bind_ip = if is_v6 {
+                        IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+                    } else {
+                        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+                    };
+                    match s.bind(&SockAddr::from(std::net::SocketAddr::new(bind_ip, ident))) {
+                        Ok(()) => {
+                            // Connect so send/recv need no address each round and incoming
+                            // packets are filtered to this peer; it also pins the source
+                            // address used for the v6 pseudo-header checksum.
+                            s.connect(&SockAddr::from(std::net::SocketAddr::new(target, 0)))?;
+                            return Ok(Self {
+                                socket: s,
+                                target,
+                                is_v6,
+                                no_ip_header: true,
+                                ident,
+                                method: SocketMethod::Dgram,
+                            });
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                            dgram_err = Some(e);
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => {
+                    dgram_err = Some(e);
+                    break;
+                }
+            }
+        }
+        match Socket::new(domain, Type::RAW, Some(proto)) {
+            Ok(s) => {
+                s.connect(&SockAddr::from(std::net::SocketAddr::new(target, 0)))?;
+                Ok(Self {
+                    socket: s,
+                    target,
+                    is_v6,
+                    no_ip_header: is_v6,
+                    ident: next_ident(),
+                    method: SocketMethod::Raw,
+                })
+            }
+            Err(_) => Err(dgram_err.unwrap_or_else(|| {
+                io::Error::new(io::ErrorKind::Other, "no ICMP socket available")
+            })),
+        }
     }
 
     fn build_request(&self, seq: u16) -> Vec<u8> {
@@ -259,5 +329,64 @@ mod tests {
             .ping(1, Duration::from_millis(200))
             .expect_err("TEST-NET-1 must not answer");
         assert!(matches!(err, PingError::Timeout));
+    }
+
+    /// Bind check: a DGRAM pinger's socket must report the ident it
+    /// was opened with as its local port. Same skip rule as the live
+    /// tests above; RAW pingers skip (raw sockets are not bound).
+    #[test]
+    fn dgram_bind_sets_local_ident() {
+        let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let pinger = match IcmpPinger::new(target) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping live ICMP test: cannot open socket: {e}");
+                return;
+            }
+        };
+        if pinger.method != SocketMethod::Dgram {
+            eprintln!("skipping bind check: fell back to RAW socket");
+            return;
+        }
+        let local = pinger
+            .socket
+            .local_addr()
+            .expect("bound DGRAM socket must have a local address");
+        let port = local
+            .as_socket()
+            .expect("local address must be an IP socket address")
+            .port();
+        assert_eq!(port, pinger.ident);
+        assert_ne!(pinger.ident, 0);
+    }
+
+    /// Cell uniqueness: six pingers held alive at once (the fleet's
+    /// six probe cells) must all get distinct, nonzero idents, or
+    /// their binds would conflict. Same skip rule as above.
+    #[test]
+    fn six_pingers_get_unique_idents() {
+        let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut pingers = Vec::new();
+        for _ in 0..6 {
+            match IcmpPinger::new(target) {
+                Ok(p) => {
+                    if p.method != SocketMethod::Dgram {
+                        eprintln!("skipping uniqueness check: fell back to RAW socket");
+                        return;
+                    }
+                    pingers.push(p);
+                }
+                Err(e) => {
+                    eprintln!("skipping live ICMP test: cannot open socket: {e}");
+                    return;
+                }
+            }
+        }
+        let mut idents: Vec<u16> = pingers.iter().map(|p| p.ident).collect();
+        assert_eq!(idents.len(), 6);
+        assert!(idents.iter().all(|i| *i != 0));
+        idents.sort_unstable();
+        idents.dedup();
+        assert_eq!(idents.len(), 6, "idents must be unique");
     }
 }
