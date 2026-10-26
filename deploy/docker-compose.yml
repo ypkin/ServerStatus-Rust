@@ -16,4 +16,4 @@ services:
     volumes:
       - ./data:/data
     working_dir: /data
-    command: ["/usr/local/bin/stat_server", "-c", "/data/config.toml"]
+    command: ["-c", "/data/config.toml"]  # entrypoint already supplies the binary
