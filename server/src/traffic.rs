@@ -81,6 +81,21 @@ pub fn month_used(month_rx: u64, month_tx: u64, traffic_mode: &str) -> u64 {
     }
 }
 
+/// Split a single "month used" correction value into (month_rx, month_tx)
+/// so that `month_used` of the result equals the corrected value under the
+/// host's metering mode. Direction names follow the counters: "up" is
+/// upload = tx, "down" is download = rx. (An earlier version had up/down
+/// backwards — up put everything into rx, so the billed figure collapsed
+/// to ~0 and corrections looked like they "didn't take effect".)
+pub fn split_month_used(v: u64, traffic_mode: &str) -> (u64, u64) {
+    match traffic_mode {
+        "up" => (0, v),
+        "down" => (v, 0),
+        "max" => (v, v),
+        _ => (v / 2 + v % 2, v / 2),
+    }
+}
+
 /// First day of the billing period containing `today`, anchored on
 /// `reset_day` (1..=31, clamped to the month's length, e.g. 31 in February
 /// becomes the 28th/29th). Ported from monitor's `period_start`.
@@ -310,6 +325,46 @@ mod tests {
         assert!(!is_unlimited(9998 * 1024 * 1024 * 1024));
         assert!(!is_unlimited(1000 * 1024 * 1024 * 1024));
         assert!(!is_unlimited(1));
+    }
+
+    #[test]
+    fn split_month_used_matches_metering_mode() {
+        // "up" meters tx, "down" meters rx: the split must land the value
+        // on the metered direction, otherwise month_used collapses to 0.
+        assert_eq!(split_month_used(100, "up"), (0, 100));
+        assert_eq!(split_month_used(100, "down"), (100, 0));
+        assert_eq!(split_month_used(100, "max"), (100, 100));
+        assert_eq!(split_month_used(101, "sum"), (51, 50));
+        for mode in ["up", "down", "max", "sum"] {
+            let (rx, tx) = split_month_used(100, mode);
+            assert_eq!(month_used(rx, tx, mode), 100, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn correct_month_used_survives_later_reports() {
+        // Mirrors the admin endpoint (split by mode, then correct) followed
+        // by three client reports (accumulate): the billed figure must stay
+        // at the corrected value plus only the metered direction's deltas,
+        // never fall back to ~0 or to the pre-correction value.
+        let mut s = TrafficState::default();
+        s.accumulate("b1/x", 1000, 2000, 14, at(2026, 10, 20), Some(1_700_000_000), 0);
+        s.accumulate("b1/x", 5000, 9000, 14, at(2026, 10, 20), Some(1_700_000_000), 1_700_001_000);
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 7000);
+        // Admin corrects month used to 50 GiB-equivalent units under "up".
+        let (rx, tx) = split_month_used(50_000, "up");
+        s.correct(Some(rx), Some(tx), None, None, 14, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 50_000);
+        // Three later reports, each adding (100 rx, 300 tx).
+        let mut last_rx = 5000u64;
+        let mut last_tx = 9000u64;
+        for _ in 0..3 {
+            last_rx += 100;
+            last_tx += 300;
+            s.accumulate("b1/x", last_rx, last_tx, 14, at(2026, 10, 26), Some(1_700_000_000), 1_700_002_000);
+        }
+        assert_eq!(month_used(s.month_rx, s.month_tx, "up"), 50_000 + 900);
+        assert_eq!(s.month_rx, 300);
     }
 
     #[test]

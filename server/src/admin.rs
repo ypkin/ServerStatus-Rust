@@ -353,7 +353,8 @@ pub struct TrafficCorrectBody {
     pub total_rx: Option<u64>,
     pub total_tx: Option<u64>,
     /// Fork: single "month used" value, split into rx/tx by the host's
-    /// billing mode (sum: half/half, up: all rx, down: all tx, max: both).
+    /// billing mode (sum: half/half, up: all tx, down: all rx, max: both;
+    /// see traffic::split_month_used).
     pub month_used: Option<u64>,
 }
 
@@ -372,13 +373,16 @@ pub async fn put_host_traffic_correct(
             effective_host_settings(&name, &base)
         }
     };
+    // Single source of truth for the split is traffic::split_month_used.
+    // Do not inline another copy here: the previous inline version had
+    // up/down backwards (up put everything into rx), so under up/down
+    // modes a correction collapsed the billed figure to ~0 and looked
+    // like it "didn't take effect".
     let (month_rx, month_tx) = match body.month_used {
-        Some(v) => match mode.as_str() {
-            "up" => (Some(v), Some(0)),
-            "down" => (Some(0), Some(v)),
-            "max" => (Some(v), Some(v)),
-            _ => (Some(v / 2 + v % 2), Some(v / 2)),
-        },
+        Some(v) => {
+            let (rx, tx) = crate::traffic::split_month_used(v, mode.as_str());
+            (Some(rx), Some(tx))
+        }
         None => (body.month_rx, body.month_tx),
     };
     let today = chrono::Local::now().date_naive();
