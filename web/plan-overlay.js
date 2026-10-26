@@ -81,6 +81,31 @@
     bar.style.flex = '';
   }
 
+  // Mobile header fix (2026-10-27): the React header wrapper #header is
+  // a fixed 80px tall on narrow screens (bundle: h-[80px] ... md:h-[100px]),
+  // while the pill bar injected above makes the header row taller once it
+  // wraps. #body below it is opaque (dark:bg-slate-700) and pulled 20px up
+  // (-mt-[20px]), so the wrapped pills + theme toggle get painted over and
+  // vanish on phones (only the logo stays visible). Below the Tailwind md
+  // breakpoint (768px) let the header grow, keep 28px clearance above the
+  // body's overlap, and put the pills on their own full-width row under
+  // logo + toggle. Pure CSS media query: immune to React re-renders and
+  // to rotation/resize, and it never applies at >=768px, so the desktop
+  // one-row header is byte-for-byte untouched.
+  function ensureHeaderFixStyle() {
+    if (document.getElementById('ssr-mobile-header-fix')) return;
+    var st = document.createElement('style');
+    st.id = 'ssr-mobile-header-fix';
+    st.textContent = '@media (max-width: 767px){'
+      + '#header{height:auto !important;padding-bottom:28px !important;}'
+      + '#header > .container{flex-wrap:wrap !important;}'
+      + '#header h1.logo{order:1;}'
+      + '#header > .container > div.pr-8{order:2;}'
+      + '#ssr-tag-pills{order:3;flex:1 1 100% !important;}'
+      + '}';
+    document.head.appendChild(st);
+  }
+
   function renderPills() {
     if (!haveStats) return;
     var counts = pillsData();
@@ -1005,6 +1030,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    ensureHeaderFixStyle();
     refresh();
     setInterval(refresh, 30000);
     document.addEventListener('click', onDocClick);
