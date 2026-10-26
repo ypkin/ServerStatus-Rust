@@ -610,7 +610,11 @@
     // hover over the chart bubbles to. Tooltip values are raw bucket
     // values, never despiked/smoothed (Prism's rule). The time prefix
     // uses the first series that actually has points; an all-empty
-    // series list cannot throw on points[0].
+    // series list cannot throw on points[0]. Gap snap (2026-10-27):
+    // hovering a column where every series' nearest bucket is empty
+    // used to show only dashes (56idc 00:30 screenshot) — the tip now
+    // snaps to the nearest column with data and shows that column's
+    // values with its own timestamp, so time and values never disagree.
     var tip = document.createElement('div');
     tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;white-space:nowrap;display:none';
     var showTip = function (e) {
@@ -618,23 +622,55 @@
       if (!rect.width) return;
       var px = (e.clientX - rect.left) / rect.width * W;
       var ts = t0 + (px - PL) / (W - PL - PR) * (t1 - t0);
-      var parts = drawn.map(function (s) {
-        var best = -1, bd = Infinity;
-        s.points.forEach(function (p, i) {
-          var d = Math.abs(p[0] - ts);
-          if (d < bd) { bd = d; best = i; }
+      // Value lookup at a timestamp: each series contributes its
+      // nearest point's raw bucket value (null = gap bucket -> dash).
+      var lookup = function (at) {
+        return drawn.map(function (s) {
+          var best = -1, bd = Infinity;
+          s.points.forEach(function (p, i) {
+            var d = Math.abs(p[0] - at);
+            if (d < bd) { bd = d; best = i; }
+          });
+          return best >= 0 ? s.raw[best] : null;
         });
-        var v = best >= 0 ? s.raw[best] : null;
-        return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
-      });
+      };
+      var vals = lookup(ts);
       var tSeries = null;
       for (var si = 0; si < drawn.length; si++) {
         if (drawn[si].points.length) { tSeries = drawn[si]; break; }
       }
-      var t = tSeries ? tSeries.points.reduce(function (acc, p) {
+      var showTs = tSeries ? tSeries.points.reduce(function (acc, p) {
         return Math.abs(p[0] - ts) < Math.abs(acc - ts) ? p[0] : acc;
       }, tSeries.points[0][0]) : null;
-      tip.textContent = (t !== null ? fmtT(t) + ' · ' : '') + parts.join(' · ');
+      // Gap snap: when the hovered column is a gap bucket in every
+      // series, a plain lookup shows only dashes (the 56idc 00:30
+      // screenshot). Snap to the nearest column that actually has
+      // data (ties -> earlier column) and show that column's values
+      // with its own timestamp, so time and values never disagree.
+      // Only when no column in the whole chart has data do we say so.
+      var snapTs = null;
+      var allDash = vals.every(function (v) { return v === null || v === undefined; });
+      if (allDash) {
+        var snapD = Infinity;
+        drawn.forEach(function (s) {
+          s.points.forEach(function (p, i) {
+            if (s.raw[i] === null || s.raw[i] === undefined) return;
+            var d = Math.abs(p[0] - ts);
+            if (d < snapD) { snapD = d; snapTs = p[0]; }
+          });
+        });
+        if (snapTs !== null) {
+          vals = lookup(snapTs);
+          showTs = snapTs;
+        }
+      }
+      var parts = drawn.map(function (s, idx) {
+        var v = vals[idx];
+        return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
+      });
+      tip.textContent = (allDash && snapTs === null)
+        ? '暂无数据'
+        : ((showTs !== null ? fmtT(showTs) + ' · ' : '') + parts.join(' · '));
       tip.style.display = 'block';
       tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
       tip.style.top = Math.min(e.clientY + 12, window.innerHeight - 40) + 'px';
