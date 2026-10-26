@@ -135,8 +135,12 @@ pub fn classify_v4(ip: std::net::Ipv4Addr) -> V4Class {
 /// True for global unicast IPv6 (2000::/3). This excludes loopback
 /// (::1), link-local (fe80::/10), ULA (fc00::/7) and multicast
 /// (ff00::/8) by construction, so no separate checks are needed.
+/// The documentation prefix 2001:db8::/32 (RFC 3849) also lies inside
+/// 2000::/3, so it needs an explicit exclusion: it is never a real
+/// host address (exact once reported 2001:db8:1::1 as its v6).
 pub fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
-    ip.segments()[0] & 0xe000 == 0x2000
+    let s = ip.segments();
+    s[0] & 0xe000 == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
 }
 
 /// Real NIC addresses for the admin IP column (fork).
@@ -766,6 +770,8 @@ mod tests {
     fn v6_global_unicast_only() {
         assert!(is_global_v6("2401:8360:1:4f::a".parse().unwrap()));
         assert!(is_global_v6("2001:470:18:aec::2".parse().unwrap()));
+        assert!(!is_global_v6("2001:db8:1::1".parse().unwrap()));
+        assert!(!is_global_v6("2001:db8::1".parse().unwrap()));
         assert!(!is_global_v6(Ipv6Addr::LOCALHOST));
         assert!(!is_global_v6("fe80::1".parse().unwrap()));
         assert!(!is_global_v6("fc00::1".parse().unwrap()));

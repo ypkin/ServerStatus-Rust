@@ -292,6 +292,12 @@
   function inject() {
     var names = Object.keys(planByName);
     if (!names.length) return;
+    // Batch 4: v7's separate detail rows are gone (relocated into
+    // React's own detail block, see below); drop any still in the
+    // DOM from the old script so they never stack under the new block.
+    Array.prototype.slice.call(document.querySelectorAll('tr[data-ssr-detail-row]')).forEach(function (r) {
+      if (r.parentNode) r.parentNode.removeChild(r);
+    });
     renderPills();
     swapColumns();
     // Anchor: the alias cell div (class "truncate" inside a td).
@@ -358,54 +364,62 @@
           }
         }
       }
-      // Detail block (batch 3, cdt fix): a full-width row of its own
-      // (tr[data-ssr-detail-row] + td colspan = the row's cell count),
-      // inserted right after the main row — never crammed into the
-      // first (now second, after the column swap) narrow name cell,
-      // which is what squeezed every line into a vertical stack with
-      // the rest of the row empty. Lines are plain divs (no
-      // div.truncate class) so the name-cell loop above never mistakes
-      // them for node rows. Present iff expanded, rebuilt only when
-      // its key changes; a legacy in-cell block from an older overlay
-      // version is removed so the two never stack.
+      // Detail block (batch 4, relocation): the overlay lines live
+      // INSIDE React's own expanded row — the wide centered detail
+      // block (load/memory/swap/disk/TCP/UDP/latency) — appended at
+      // the end of its single colspan td. No table row or cell of
+      // our own anymore: batch 3's separate full-width row is gone,
+      // and nothing is ever crammed into the narrow name cell again.
+      // React wipes foreign DOM on refresh, so the block is
+      // re-attached on every inject (same pattern as the pills). If
+      // React's row is not in the DOM yet (it renders just after the
+      // click), the next MutationObserver pass attaches it; nothing
+      // is rendered into a table cell in the meantime. Lines are
+      // plain divs (no div.truncate class) so the name-cell loop
+      // above never mistakes them for node rows. Present iff
+      // expanded, rebuilt only when its key changes; a legacy
+      // in-cell block from an older overlay version is removed so
+      // the two never stack.
       var legacy = td.querySelector('[data-ssr-detail]');
       if (legacy) legacy.remove();
-      var detailRow = null;
-      if (tr && tr.nextElementSibling && tr.nextElementSibling.getAttribute
-          && tr.nextElementSibling.getAttribute('data-ssr-detail-row') === srv.name) {
-        detailRow = tr.nextElementSibling;
+      // React's own expand row: the row right after the main row,
+      // with a single colspan td. Any other shape (another node's
+      // main row, a leftover) is rejected, never attached into.
+      var reactTd = null;
+      if (tr && tr.nextElementSibling) {
+        // In a tbody the next sibling can only be another row; the
+        // single-td shape is React's expand row, a multi-td row is
+        // the next node's main row and is never attached into.
+        var rtds = tr.nextElementSibling.querySelectorAll('td');
+        if (rtds.length === 1) reactTd = rtds[0];
       }
       if (!expanded[srv.name]) {
-        if (detailRow && detailRow.parentNode) detailRow.parentNode.removeChild(detailRow);
+        if (reactTd) {
+          var stale = reactTd.querySelector('[data-ssr-detail]');
+          if (stale) stale.remove();
+        }
         return;
       }
-      if (!tr || !tr.parentNode) return;
+      if (!reactTd) return; // React has not rendered its row yet; retry next inject.
       var wanted = detailLines(srv);
       var key = wanted.join('\n');
-      if (detailRow) {
-        if (detailRow.getAttribute('data-ssr-key') === key) {
-          if (detailRow.style.display !== wantDisp) detailRow.style.display = wantDisp;
-          return;
-        }
-        detailRow.parentNode.removeChild(detailRow);
-        detailRow = null;
+      var block = reactTd.querySelector('[data-ssr-detail]');
+      if (block) {
+        if (block.getAttribute('data-ssr-key') === key) return;
+        block.parentNode.removeChild(block);
+        block = null;
       }
-      detailRow = document.createElement('tr');
-      detailRow.setAttribute('data-ssr-detail-row', srv.name);
-      detailRow.setAttribute('data-ssr-key', key);
-      detailRow.style.display = wantDisp;
-      var dtd = document.createElement('td');
-      var colCount = tr.querySelectorAll('td').length || 16;
-      dtd.setAttribute('colspan', String(colCount));
-      dtd.style.cssText = 'padding:6px 12px;background:#f9fafb;text-align:left';
+      block = document.createElement('div');
+      block.setAttribute('data-ssr-detail', '1');
+      block.setAttribute('data-ssr-key', key);
+      block.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid #e5e7eb;text-align:left';
       wanted.forEach(function (text) {
         var line = document.createElement('div');
         line.style.cssText = 'font-size:11px;line-height:1.5;color:#6b7280;white-space:normal;word-break:break-word;margin-top:2px';
         line.textContent = text;
-        dtd.appendChild(line);
+        block.appendChild(line);
       });
-      detailRow.appendChild(dtd);
-      tr.parentNode.insertBefore(detailRow, tr.nextSibling);
+      reactTd.appendChild(block);
     });
   }
 
