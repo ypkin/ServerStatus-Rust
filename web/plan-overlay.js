@@ -257,6 +257,34 @@
         var wantDisp = (activeTag !== null && (srv.tag || '') !== activeTag) ? 'none' : '';
         if (tr.style.display !== wantDisp) tr.style.display = wantDisp;
       }
+      // Main-panel location column: replace the place-name text with a
+      // flag image (batch 3). The React cell is td.w-11, the only cell
+      // of that width in the row. Only touch it when its text is this
+      // node's location and stats carries a country code — never guess
+      // a flag, and never touch a cell that does not match (bundle
+      // changes must fail safe, not clobber another column). React
+      // wipes foreign DOM on refresh, so re-apply when the marker is
+      // gone; the marker makes a second pass a no-op. This runs for
+      // every row, not just expanded ones (it sits before the early
+      // return below). The title keeps the place name on hover.
+      if (tr && srv.location && srv.country_code) {
+        var locTd = tr.querySelector('td.w-11');
+        if (locTd) {
+          var locText = (locTd.textContent || '').trim();
+          if ((locText === srv.location || locText.endsWith(srv.location))
+              && !locTd.querySelector('[data-ssr-flag]')) {
+            locTd.innerHTML = '';
+            var flag = document.createElement('img');
+            flag.setAttribute('data-ssr-flag', '1');
+            flag.src = 'https://flagcdn.com/w40/' + srv.country_code.toLowerCase() + '.png';
+            flag.alt = srv.country_code;
+            flag.title = srv.location;
+            flag.style.cssText = 'width:20px;vertical-align:middle';
+            flag.onerror = function () { this.style.display = 'none'; };
+            locTd.appendChild(flag);
+          }
+        }
+      }
       // Detail block: present iff expanded, rebuilt only when changed.
       var block = td.querySelector('[data-ssr-detail]');
       if (!expanded[srv.name]) {
@@ -308,6 +336,8 @@
             name: s.name,
             tag: s.tag || '',
             display: (s.alias || s.name || '').trim(),
+            location: s.location || '',
+            country_code: s.country_code || '',
             plan_start_date: s.plan_start_date || '',
             annual_fee: s.annual_fee || 0,
             currency: s.currency || '$',
