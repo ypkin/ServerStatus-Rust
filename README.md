@@ -16,7 +16,7 @@ cd ServerStatus-Rust
 mkdir -p data
 ```
 
-按第 3 节写好 `data/config.toml`（`data` 里只手写这一个文件；`stats.json`、`traffic.json`、`admin.json`、`ping_history.json` 由服务端自动生成，缺失按空加载，**不要手建空 JSON 文件**，空文件不是合法 JSON）。
+按第 3 节写好 `data/config.toml`（`data` 里只手写这一个文件；`stats.json`、`traffic.json`、`admin.json`、`ping_history.json` 由服务端自动生成，缺失按空加载，**不要手建空 JSON 文件**，空文件不是合法 JSON）。Docker 下 `config.toml` 里必须加 `workspace = "/data"`（否则服务端默认写容器内 `/opt/ServerStatus`，不进 `./data` 卷，容器重建会丢数据）。
 
 在仓库根目录新建 `docker-compose.yml`：
 
@@ -41,7 +41,7 @@ services:
 docker compose up -d
 ```
 
-无需等待构建，拉取镜像即可启动。启动后打开 `http://<服务端IP>:8080`，能看到面板即服务端已起。镜像是 amd64 + arm64 双架构，x86 与 ARM 机器自动选对版本。`latest` 只在 docker.yml 构建成功后更新（目前需手动触发，master 有新提交不等于 latest 已更新）。
+无需等待构建，拉取镜像即可启动。启动后打开 `http://<服务端IP>:8080`，能看到面板即服务端已起。镜像是 amd64 + arm64 双架构，x86 与 ARM 机器自动选对版本。`latest` 只在 docker.yml 构建成功后更新（触发方式见第 9 节；master 有新提交不等于 latest 已更新）。
 
 日常命令：
 
@@ -114,6 +114,9 @@ offline_threshold = 30
 admin_user = "<管理员账号>"
 admin_pass = "<强密码>"
 
+# workspace 指定数据目录：Docker 下填 "/data"，裸二进制下留空即默认 /opt/ServerStatus
+# workspace = "/data"
+
 # 单机模式：name 唯一，password 是客户端 -p 要用的密码
 hosts = [
   {name = "node1", password = "<节点密码>", alias = "节点 1", location = "cn", type = "kvm"},
@@ -158,6 +161,8 @@ channel = "wechat"
 - **监听**：`grpc_addr` 是 gRPC 端口（默认 9394，客户端直连用）；`http_addr` 是面板与 `/report` 端口（默认 8080）。公网只需暴露反代的 80/443，8080/9394 保持本机监听即可；客户端都走 https `/report` 时 9394 可不映射公网。
 - **下线判定**：`offline_threshold` 是多少秒无上报判下线（默认 30）。
 - **管理员**：`admin_user` / `admin_pass` 是 `/admin` 的登录账号，必须填。后台改动持久化在服务端 `admin.json`（0600），不改写 `config.toml`。
+- **数据目录**：`workspace` 指定数据文件（stats / traffic / admin / 探针历史）写到哪里，默认 `/opt/ServerStatus`。Docker 下必须填 `"/data"`（与 compose 的 working_dir / 卷一致），否则数据写容器内、重建会丢；裸二进制下留空即默认，与 WorkingDirectory 一致。
+- **鉴权密钥**：`jwt_secret` 留空则每次启动随机生成，重启后需重新登录 `/admin`；想长期有效就填一个固定值。
 - **单机与分组**：`hosts` 是单机模式（每台一个 `name`，唯一，`password` 对应客户端 `-p`）；`hosts_group` 是分组模式（客户端用 `-g <分组名> -p <分组密码>` 接入即自动建节点）。二选一，不要混写同一台。`alias` 是展示名，`location` 是国家/地区（国旗用），`type` 是虚拟化类型。单机还可加 `labels`（自定义标签）、`notify = false`（单独关掉线告警）、`disabled = true`（单机禁用）。
 - **有效设置优先级**：后台填过的值优先，其次是分组模板的套餐默认值，最后才是 `config.toml`。后台改动即时生效，不用重启服务端。
 - **流量口径**：主面板「总流量」为网卡开机累计（`network_in / network_out`）；「月流量」为本月累计（`month_rx / month_tx`）；详情行只显示本月三项：已用 · 剩余 · 每月限制。计费模式 `sum | up | down | max`（up 只计出方向、down 只计入方向、max 取大、空或未知归 sum）；重置日 1–31 号（留空为自然月）。vnstat 节点保持原路，老客户端走旧基线。
@@ -332,3 +337,13 @@ rc-service stat_client start
 - 客户端流量双计：隧道机器用 `--iface` 只上报指定网卡。
 - 客户端动态版起不来：必须用 musl 静态版，动态版在 glibc 较低的机器上起不来。
 - 不要混用上游 Release 二进制：上游客户端没有 ICMP 探针与服务端下发探针，上游服务端没有后台、流量累计与探针历史。
+
+## 9. 维护者：发布新版
+
+### 客户端新版
+
+打 `client-v*` 标签并推（如 `git tag client-v2 && git push origin client-v2`，标签名每次换新的），或 Actions → Release client → Run workflow 填新 tag；工作流自动编 musl 静态版并挂到 Release 上。§6 的 latest 链接自动跟进新版；固定版本示例需手动改标签名。打 `client-v*` 标签不会触发上游遗留的 release.yml（它只认 `v*`），不用管它。
+
+### 服务端新版镜像
+
+Actions → Build and Push to GHCR → Run workflow（在 master 上手动触发）；master push 不自动跑，`port/traffic-admin-ping` push 才自动跑（README / .gitignore 改动不触发）。跑绿后 ghcr 的 `latest` 更新，用户侧 `docker compose pull && docker compose up -d` 即可。
