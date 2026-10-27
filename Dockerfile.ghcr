@@ -1,0 +1,39 @@
+# =========================
+# Stage 1: Build stage
+# =========================
+FROM rust:1.80-slim-bullseye AS builder
+
+WORKDIR /usr/src/serverstatus
+
+# 安装编译依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制源码并编译
+COPY . .
+RUN cargo build --release
+
+# =========================
+# Stage 2: Runtime stage
+# =========================
+FROM debian:bullseye-slim
+
+WORKDIR /app
+
+# 安装基础运行依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    libssl1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制编译后的二进制文件
+COPY --from=builder /usr/src/serverstatus/target/release/stat_server /app/stat_server
+
+EXPOSE 8080 35601
+
+ENV TZ=Asia/Shanghai
+
+ENTRYPOINT ["/app/stat_server"]
