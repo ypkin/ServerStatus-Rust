@@ -556,9 +556,6 @@ pub fn from_str(content: &str) -> Option<Config> {
         o.jwt_secret = Some(Uuid::new_v4().to_string());
     }
 
-    eprintln!("✨ admin_user: {}", o.admin_user.as_ref()?);
-    eprintln!("✨ admin_pass: {}", o.admin_pass.as_ref()?);
-
     Some(o)
 }
 
