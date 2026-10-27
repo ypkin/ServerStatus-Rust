@@ -11,7 +11,7 @@
 预编译镜像已发布（amd64 + arm64 双架构，匿名拉取无需登录），Docker 部署推荐直接 pull，不用本地构建。
 
 ```bash
-git clone <本仓库地址>
+git clone https://github.com/ypkin/ServerStatus-Rust.git
 cd ServerStatus-Rust
 mkdir -p data
 ```
@@ -67,7 +67,7 @@ cp -r data data.bak-$(date +%F)     # 备份数据目录（config + 统计 + 后
 ## 2. 服务端：裸二进制方式（备选）
 
 ```bash
-git clone <本仓库地址>
+git clone https://github.com/ypkin/ServerStatus-Rust.git
 cd ServerStatus-Rust
 touch server/build.rs   # 否则 banner 里的提交号可能缓存成旧值
 cargo build --release -p stat_server
@@ -119,7 +119,7 @@ hosts = [
   {name = "node1", password = "<节点密码>", alias = "节点 1", location = "cn", type = "kvm"},
 ]
 
-# 或者分组模式（二选一）：客户端用 -g <gid> -p <分组密码> 接入即自动建节点
+# 或者分组模式（二选一）：客户端用 -g <分组名> -p <分组密码> 接入即自动建节点
 # hosts_group = [
 #   {gid = "g1", password = "<分组密码>", location = "cn", type = "kvm"},
 # ]
@@ -158,7 +158,7 @@ channel = "wechat"
 - **监听**：`grpc_addr` 是 gRPC 端口（默认 9394，客户端直连用）；`http_addr` 是面板与 `/report` 端口（默认 8080）。公网只需暴露反代的 80/443，8080/9394 保持本机监听即可；客户端都走 https `/report` 时 9394 可不映射公网。
 - **下线判定**：`offline_threshold` 是多少秒无上报判下线（默认 30）。
 - **管理员**：`admin_user` / `admin_pass` 是 `/admin` 的登录账号，必须填。后台改动持久化在服务端 `admin.json`（0600），不改写 `config.toml`。
-- **单机与分组**：`hosts` 是单机模式（每台一个 `name`，唯一，`password` 对应客户端 `-p`）；`hosts_group` 是分组模式（客户端用 `-g <gid> -p <分组密码>` 接入即自动建节点）。二选一，不要混写同一台。`alias` 是展示名，`location` 是国家/地区（国旗用），`type` 是虚拟化类型。单机还可加 `labels`（自定义标签）、`notify = false`（单独关掉线告警）、`disabled = true`（单机禁用）。
+- **单机与分组**：`hosts` 是单机模式（每台一个 `name`，唯一，`password` 对应客户端 `-p`）；`hosts_group` 是分组模式（客户端用 `-g <分组名> -p <分组密码>` 接入即自动建节点）。二选一，不要混写同一台。`alias` 是展示名，`location` 是国家/地区（国旗用），`type` 是虚拟化类型。单机还可加 `labels`（自定义标签）、`notify = false`（单独关掉线告警）、`disabled = true`（单机禁用）。
 - **有效设置优先级**：后台填过的值优先，其次是分组模板的套餐默认值，最后才是 `config.toml`。后台改动即时生效，不用重启服务端。
 - **流量口径**：主面板「总流量」为网卡开机累计（`network_in / network_out`）；「月流量」为本月累计（`month_rx / month_tx`）；详情行只显示本月三项：已用 · 剩余 · 每月限制。计费模式 `sum | up | down | max`（up 只计出方向、down 只计入方向、max 取大、空或未知归 sum）；重置日 1–31 号（留空为自然月）。vnstat 节点保持原路，老客户端走旧基线。
 - **探针**：`[ping]` 的 `enabled` 是总开关；`cu / ct / cm` 分别是联通 / 电信 / 移动，`_name` 是显示名，`_addr` 与 `_addr_v6` 是 v4 / v6 探针地址。探针为 ICMP echo，只测到主机的往返，不依赖目标端口，配置里的端口自动剥离。探针历史由服务端持久化（分钟桶与小时桶均值），只能从部署起攒，不编造。后台改探针地址后客户端下次上报自动生效，不用逐台改命令行。
