@@ -1,0 +1,974 @@
+// Fork overlay: group pills + expandable node details on the main panel
+// without rebuilding the precompiled React bundle.
+//
+// The React table renders one row per server; the first cell holds the
+// display name (alias, falling back to the node name) inside a truncated
+// div. Clicking the name cell expands React's own detail row under it;
+// the overlay appends a tabbed detail block inside that wide row
+// while hiding React's own centered detail block there (the user
+// asked to delete the native load/memory/swap/disk/TCP/UDP/latency
+// block and keep only the overlay block): a
+// node summary line, then 网络延迟 / 系统概览 tabs. The latency tab
+// carries the live probe lines plus a Prism-ported chart (1h/6h/24h/7d
+// ranges, 削峰/平滑 toggles, one line per user-named probe, v4/v6
+// split); the chart is sampled by the browser itself from the live
+// stats stream (one value per probe/stack per 30 s refresh), so
+// closing the browser restarts its history. The overview tab carries
+// only what React's own expanded row does not already show (plan,
+// system, CPU model, traffic, boot time, online duration, last
+// activity, version, public note); clicking again collapses it. The
+// 节点/协议 columns are swapped (protocol first) and the Tag pill bar
+// sits in the page header next to the ServerStatus title.
+// A nezha-style pill bar above the panel groups rows by Tag (empty Tag =
+// 默认组): dark rounded pills, white bold text, "name count"; clicking a
+// pill filters rows to that Tag, clicking it again (or 全部) clears.
+// React wipes foreign DOM on every stats refresh, so a MutationObserver
+// re-applies indicators, detail blocks and the row filter (loop-safe:
+// only touch the DOM when the wanted content differs). The pill bar
+// itself lives before #root, outside React's tree, so React never wipes
+// it; it is rebuilt only when its signature (counts/active) changes.
+//
+// Data comes from /json/stats.json (public). Anything missing is omitted,
+// never fabricated (in particular no expiry date is derived).
+(function () {
+  'use strict';
+  var GiB = 1024 * 1024 * 1024;
+  var planByName = {};
+  var expanded = {}; // node name -> true while its detail block is open
+  var activeTag = null; // null = all rows; '' = default group; else a Tag
+  var haveStats = false; // true once stats.json has loaded at least once
+
+  function tagDisplay(tag) { return tag ? tag : '默认'; }
+
+  function pillsData() {
+    var counts = {};
+    Object.keys(planByName).forEach(function (n) {
+      var t = planByName[n].tag || '';
+      counts[t] = (counts[t] || 0) + 1;
+    });
+    return counts;
+  }
+
+  // Batch 3: the pill bar lives in the page header, next to the
+  // ServerStatus title (h1.logo), not above the table. The title is
+  // shrunk so title + pills + theme toggle fit one row without
+  // overlapping; on narrow screens the header wraps. React only
+  // re-renders the header on a theme toggle, which would wipe a bar
+  // placed inside it — so placement is re-checked on every renderPills
+  // call, not just when the pill signature changes. Before React has
+  // rendered the header, the bar falls back to sitting before #root
+  // and is moved up on the next inject.
+  function placePills(bar) {
+    var h1 = document.querySelector('h1.logo');
+    if (h1 && h1.parentNode) {
+      h1.style.fontSize = '18px';
+      h1.style.whiteSpace = 'nowrap';
+      var cont = h1.parentNode;
+      cont.style.flexWrap = 'wrap';
+      if (bar.parentNode !== cont || bar.previousSibling !== h1) {
+        cont.insertBefore(bar, h1.nextSibling);
+      }
+      bar.style.padding = '4px 8px';
+      bar.style.flex = '1 1 auto';
+      bar.style.justifyContent = 'flex-start';
+      return;
+    }
+    var root = document.getElementById('root');
+    if (root && root.parentNode && bar.parentNode !== root.parentNode) {
+      root.parentNode.insertBefore(bar, root);
+    }
+    bar.style.padding = '12px 16px';
+    bar.style.flex = '';
+  }
+
+  function renderPills() {
+    if (!haveStats) return;
+    var counts = pillsData();
+    var tags = Object.keys(counts).sort(function (a, b) {
+      if (a === '') return -1;
+      if (b === '') return 1;
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+    var total = 0;
+    tags.forEach(function (t) { total += counts[t]; });
+    var sigParts = ['all:' + total, 'active:' + (activeTag === null ? '*' : activeTag)];
+    tags.forEach(function (t) { sigParts.push(t + '=' + counts[t]); });
+    var sig = sigParts.join('|');
+    var bar = document.getElementById('ssr-tag-pills');
+    if (bar && bar.getAttribute('data-ssr-sig') === sig) {
+      placePills(bar);
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'ssr-tag-pills';
+      var root = document.getElementById('root');
+      if (root && root.parentNode) root.parentNode.insertBefore(bar, root);
+      else document.body.insertBefore(bar, document.body.firstChild);
+    }
+    bar.setAttribute('data-ssr-sig', sig);
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;align-items:center;';
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    var mk = function (label, tag) {
+      var b = document.createElement('button');
+      var isActive = (tag === null ? activeTag === null : activeTag === tag);
+      b.style.cssText = 'border:0;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:700;color:#fff;cursor:pointer;background:' + (isActive ? '#0a6cff' : '#374151');
+      b.textContent = label;
+      b.title = tag === null ? '显示全部节点' : '只显示 ' + tagDisplay(tag) + ' 组的节点';
+      b.addEventListener('click', function () {
+        if (tag === null) activeTag = null;
+        else if (activeTag === tag) activeTag = null;
+        else activeTag = tag;
+        renderPills();
+        inject();
+      });
+      return b;
+    };
+    bar.appendChild(mk('全部 ' + total, null));
+    tags.forEach(function (t) {
+      bar.appendChild(mk(tagDisplay(t) + ' ' + counts[t], t));
+    });
+    placePills(bar);
+  }
+
+  function fmtGiB(bytes) {
+    var v = bytes / GiB;
+    return (Math.round(v * 100) / 100) + 'GiB';
+  }
+
+  // Units in stats.json (see client sys_info::sample): memory totals are
+  // KiB (bytes / 1024), disk totals are MB (calc_hdd_stats). The detail
+  // view divides by the same units, so these helpers must too — dividing
+  // by 2^30 as if they were bytes yields 0GiB for every real machine.
+  function fmtGiBFromKiB(kib) {
+    return (Math.round(kib / 1024 / 1024 * 100) / 100) + 'GiB';
+  }
+  function fmtGiBFromMB(mb) {
+    return (Math.round(mb / 1024 * 100) / 100) + 'GiB';
+  }
+
+  function fmtFee(fee, cur) {
+    return (cur || '$') + (Math.round(fee * 100) / 100);
+  }
+
+  // Bandwidth display, same rule as the admin table (fmtBw there):
+  // storage stays Mbps; <1000 -> Mbps, >=1000 -> Gbps, >=1000000 -> Tbps.
+  function fmtBw(mbps) {
+    mbps = Number(mbps) || 0;
+    if (mbps >= 1000000) return trimNum(mbps / 1000000) + 'Tbps';
+    if (mbps >= 1000) return trimNum(mbps / 1000) + 'Gbps';
+    return mbps + 'Mbps';
+  }
+  function trimNum(v) {
+    return String(Math.round(v * 1000) / 1000);
+  }
+
+  function fmtDate(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return '—'; }
+  }
+
+  function pct(used, total) {
+    if (!total) return '';
+    return ' (' + (Math.round(used / total * 1000) / 10) + '%)';
+  }
+
+  // Unlimited traffic spellings: 0 (old) and 9999 GiB (admin form).
+  // 9999 must never render as a quota (see traffic::is_unlimited).
+  function isUnlimitedTraffic(bytes) {
+    return !bytes || Math.round(bytes / GiB) === 9999;
+  }
+
+  function planLine(s) {
+    var parts = [];
+    if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
+    // Batch 3: end date shows only when the user actually filled it.
+    // Nothing is ever derived from the fee or the start date.
+    if (s.plan_end_date) parts.push('结束 ' + s.plan_end_date);
+    if (s.annual_fee > 0) parts.push('年费 ' + fmtFee(s.annual_fee, s.currency));
+    if (s.bandwidth_mbps > 0) parts.push('带宽 ' + fmtBw(s.bandwidth_mbps));
+    if (isUnlimitedTraffic(s.traffic_limit)) {
+      if (parts.length > 0) parts.push('限额不限量');
+    } else parts.push('限额 ' + fmtGiB(s.traffic_limit));
+    return parts.length ? '套餐：' + parts.join(' · ') : '套餐：—';
+  }
+
+  function probeLines(srv) {
+    // One latency line per user-configured probe (see stats.json
+    // ping_probes): only configured probes/stacks appear, under the
+    // user-edited probe name. A configured stack with no measurement yet
+    // shows —. Unconfigured probes never appear here.
+    var lines = [];
+    (srv.ping_probes || []).forEach(function (p) {
+      var stack = function (v) {
+        if (!v) return null;
+        return (v.time > 0 || v.loss > 0) ? (v.time + 'ms/' + v.loss + '%') : '—';
+      };
+      var parts = [];
+      var v4 = stack(p.v4), v6 = stack(p.v6);
+      if (v4 !== null) parts.push('v4 ' + v4);
+      if (v6 !== null) parts.push('v6 ' + v6);
+      if (parts.length) lines.push('延迟 ' + p.name + '：' + parts.join(' · '));
+    });
+    return lines;
+  }
+
+  // Boot time from the real seconds field (stats uptime_sec). The old
+  // code read stats "uptime", which is the formatted string ("N 天" /
+  // "HH:MM:SS") — multiplying a string gave NaN and the panel printed
+  // "NaN-NaN-NaN NaN:NaN". Any non-numeric, non-positive or
+  // out-of-range value hides the row instead of printing NaN.
+  function bootLine(uptimeSec) {
+    var sec = Number(uptimeSec);
+    if (!isFinite(sec) || sec <= 0) return '';
+    var d = new Date(Date.now() - sec * 1000);
+    if (isNaN(d.getTime())) return '';
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return '启动时间：' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function detailLines(s) {
+    var lines = [];
+    var si = s.sys_info || {};
+    // Plan line plus live IPv4/IPv6 badges (batch 3: the expanded area
+    // must carry the plan + connectivity, not just the collapsed row).
+    lines.push(planLine(s) + ' · IPv4 ' + (s.online4 ? '✓' : '✗') + ' · IPv6 ' + (s.online6 ? '✓' : '✗'));
+    var os = [si.os_name, si.os_release, si.kernel_version].filter(Boolean).join(' ');
+    var sysParts = [];
+    if (os) sysParts.push(os);
+    if (si.os_arch) sysParts.push(si.os_arch);
+    if (s.host_type) sysParts.push(s.host_type);
+    if (sysParts.length) lines.push('系统：' + sysParts.join(' · '));
+    // Batch 3 (cdt detail fix): the overlay detail keeps ONLY what
+    // React does not already show — plan, system, CPU model, traffic,
+    // boot, online duration, last activity, version, public note.
+    // Load, memory, disk, swap, process/connection counts and probe
+    // latency already live in React's own expanded row below, so
+    // repeating them here stacked two identical sections together.
+    if (si.cpu_brand || si.cpu_num) {
+      var cpu = (si.cpu_brand || '') + (si.cpu_num ? ' × ' + si.cpu_num : '');
+      lines.push('CPU：' + cpu);
+    }
+    var tParts = [];
+    if (s.month_rx + s.month_tx > 0) {
+      tParts.push('本月入 ' + fmtGiB(s.month_rx) + ' / 出 ' + fmtGiB(s.month_tx));
+    }
+    tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
+    tParts.push('本月已用 ' + fmtGiB(s.month_used));
+    tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
+    tParts.push(isUnlimitedTraffic(s.traffic_limit) ? '限额不限量' : '限额 ' + fmtGiB(s.traffic_limit));
+    lines.push('流量：' + tParts.join(' · '));
+    var boot = bootLine(s.uptime_sec);
+    if (boot) lines.push(boot);
+    if (s.uptime_display) lines.push('在线时长：' + s.uptime_display);
+    lines.push('最后活动：' + fmtDate(s.latest_ts));
+    if (s.version) lines.push('版本号：' + s.version);
+    if (s.public_note) lines.push('公开备注：' + s.public_note);
+    return lines;
+  }
+
+  // --- Latency chart (batch 5, ported from Prism's detail drawer) ---
+  // Prism draws its latency chart from the panel's ping history; SSR has
+  // no server-side series, so the overlay samples the live stream itself
+  // (Prism's metrics-history approach: bucket live values, aggregate).
+  // Every stats refresh (30 s) appends one value per configured
+  // probe/stack into minute buckets; finalized minutes roll up into
+  // hourly buckets. Ranges 1h/6h/24h read minute buckets, 7d reads hourly
+  // buckets. History lives in memory only: closing the browser restarts
+  // it from scratch (the agreed behaviour, already told to the user).
+  // Nothing is fabricated: a timeout (the client caps at 1000 ms, so
+  // >= 1000 means the attempt timed out) is a null gap, and an
+  // unmeasured stack contributes no point at all. Tooltip shows raw
+  // bucket values, never the despiked/smoothed line (Prism's rule).
+  var latHist = {}; // name -> key -> {min:[[ts,val]...], hour:[[ts,val]...]}
+  var latPend = {}; // name -> key -> {min:{bucket,sum,n}, hour:{bucket,sum,n}}
+  var latLastSample = {}; // name -> ts
+  var detailState = {}; // name -> {tab, range, despike, smooth}
+
+  function detailStateFor(name) {
+    if (!detailState[name]) detailState[name] = { tab: 'latency', range: 24, despike: false, smooth: true };
+    return detailState[name];
+  }
+
+  function latVal(v) {
+    if (!v) return undefined; // unmeasured stack: no point, not a gap
+    if (v.time >= 1000 || v.loss >= 100) return null; // capped timeout
+    return v.time > 0 ? v.time : undefined;
+  }
+  function latPush(tier, bucket, val, cap) {
+    if (tier.length && tier[tier.length - 1][0] === bucket) { tier[tier.length - 1][1] = val; return; }
+    tier.push([bucket, val]);
+    while (tier.length > cap) tier.shift();
+  }
+  function latFinalizeMin(name, key, bucket, val) {
+    var h = latHist[name][key];
+    latPush(h.min, bucket, val, 1440);
+    var hb = Math.floor(bucket / 3600) * 3600;
+    var p = latPend[name][key].hour;
+    if (p.bucket !== hb) {
+      if (p.bucket !== 0) {
+        latPush(h.hour, p.bucket, p.n > 0 ? Math.round(p.sum / p.n) : null, 168);
+      }
+      p.bucket = hb; p.sum = 0; p.n = 0;
+    }
+    if (val !== null) { p.sum += val; p.n++; }
+  }
+  function sampleLatency(servers, nowSec) {
+    var minute = Math.floor(nowSec / 60) * 60;
+    servers.forEach(function (s) {
+      if (!latHist[s.name]) { latHist[s.name] = {}; latPend[s.name] = {}; }
+      (s.ping_probes || []).forEach(function (p) {
+        ['v4', 'v6'].forEach(function (stack) {
+          var val = latVal(p[stack]);
+          if (val === undefined) return;
+          var key = p.name + ' ' + stack;
+          if (!latHist[s.name][key]) {
+            latHist[s.name][key] = { min: [], hour: [] };
+            latPend[s.name][key] = { min: { bucket: 0, sum: 0, n: 0 }, hour: { bucket: 0, sum: 0, n: 0 } };
+          }
+          var pm = latPend[s.name][key].min;
+          if (pm.bucket !== minute) {
+            if (pm.bucket !== 0) {
+              latFinalizeMin(s.name, key, pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null);
+            }
+            pm.bucket = minute; pm.sum = 0; pm.n = 0;
+          }
+          if (val !== null) { pm.sum += val; pm.n++; }
+          latLastSample[s.name] = nowSec;
+        });
+      });
+    });
+  }
+  function latSeries(name, rangeHours) {
+    var now = Math.floor(Date.now() / 1000);
+    var from = now - rangeHours * 3600;
+    var hist = latHist[name] || {};
+    var out = [];
+    Object.keys(hist).forEach(function (key) {
+      var h = hist[key], pts;
+      if (rangeHours >= 168) {
+        pts = (h.hour || []).filter(function (p) { return p[0] >= from; });
+        var hb = Math.floor(now / 3600) * 3600;
+        var mins = (h.min || []).filter(function (p) { return p[0] >= hb && p[1] !== null; });
+        if (mins.length) {
+          var s = 0; mins.forEach(function (p) { s += p[1]; });
+          pts = pts.concat([[hb, Math.round(s / mins.length)]]);
+        }
+      } else {
+        pts = (h.min || []).filter(function (p) { return p[0] >= from; });
+        var pm = (latPend[name] && latPend[name][key]) ? latPend[name][key].min : null;
+        if (pm && pm.bucket >= from && pm.bucket > 0) {
+          pts = pts.concat([[pm.bucket, pm.n > 0 ? Math.round(pm.sum / pm.n) : null]]);
+        }
+      }
+      // Downsample to at most 360 points (Prism merges the same way).
+      if (pts.length > 360) {
+        var group = Math.ceil(pts.length / 360), merged = [];
+        for (var i = 0; i < pts.length; i += group) {
+          var slice = pts.slice(i, i + group), sum = 0, n = 0;
+          slice.forEach(function (p) { if (p[1] !== null) { sum += p[1]; n++; } });
+          merged.push([slice[0][0], n > 0 ? Math.round(sum / n) : null]);
+        }
+        pts = merged;
+      }
+      out.push({ key: key, points: pts });
+    });
+    return out;
+  }
+
+  // Prism's probe colours (v4/v6 of one carrier differ), fallback palette
+  // for user-named probes.
+  var LAT_COLORS = {
+    unicom: { v4: '#38BDF8', v6: '#C084FC' },
+    mobile: { v4: '#FA471E', v6: '#2BEA5E' },
+    telecom: { v4: '#FACC15', v6: '#F472B6' },
+  };
+  var LAT_FALLBACK = ['#38BDF8', '#FA471E', '#FACC15', '#2BEA5E', '#C084FC', '#F472B6'];
+  function latColor(key, idx) {
+    var low = key.toLowerCase();
+    var stack = low.indexOf(' v6') >= 0 ? 'v6' : 'v4';
+    if (low.indexOf('联通') >= 0 || low.indexOf('unicom') >= 0) return LAT_COLORS.unicom[stack];
+    if (low.indexOf('移动') >= 0 || low.indexOf('mobile') >= 0) return LAT_COLORS.mobile[stack];
+    if (low.indexOf('电信') >= 0 || low.indexOf('telecom') >= 0) return LAT_COLORS.telecom[stack];
+    return LAT_FALLBACK[idx % LAT_FALLBACK.length];
+  }
+
+  // Despike: port of Prism format.ts despike (window 7, 3 sigma MAD).
+  function latMedian(vals) {
+    var s = vals.slice().sort(function (a, b) { return a - b; });
+    var h = s.length >> 1;
+    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
+  }
+  function latDespike(values, window, sigmas) {
+    window = window || 7; sigmas = sigmas || 3;
+    var half = window >> 1;
+    return values.map(function (v, i) {
+      if (v === null) return v;
+      var near = values.slice(Math.max(0, i - half), i + half + 1).filter(function (n) { return n !== null; });
+      if (!near.length) return v;
+      var mid = latMedian(near);
+      var mad = Math.max(latMedian(near.map(function (n) { return Math.abs(n - mid); })), 1);
+      return Math.abs(v - mid) > sigmas * 1.4826 * mad ? mid : v;
+    });
+  }
+  // Smooth: port of Prism NodeDetail smoothPing (weighted neighbours,
+  // never across a null or an offline gap > 2.5x the bucket step).
+  function latMinStep(points) {
+    var step = Infinity;
+    for (var i = 1; i < points.length; i++) {
+      var gap = points[i][0] - points[i - 1][0];
+      if (gap > 0) step = Math.min(step, gap);
+    }
+    return step;
+  }
+  function latSmooth(points, values, radius) {
+    var step = latMinStep(points);
+    if (!isFinite(step)) return values;
+    return values.map(function (value, i) {
+      if (value === null) return null;
+      var sum = value * (radius + 1), weight = radius + 1;
+      [-1, 1].forEach(function (dir) {
+        var prev = i;
+        for (var off = 1; off <= radius; off++) {
+          var next = i + dir * off;
+          if (next < 0 || next >= values.length || values[next] === null ||
+              Math.abs(points[next][0] - points[prev][0]) > step * 2.5) break;
+          var part = radius + 1 - off;
+          sum += values[next] * part; weight += part; prev = next;
+        }
+      });
+      return sum / weight;
+    });
+  }
+
+  function latLine(text) {
+    var line = document.createElement('div');
+    line.style.cssText = 'font-size:11px;line-height:1.5;color:#6b7280;white-space:normal;word-break:break-word;margin-top:2px';
+    line.textContent = text;
+    return line;
+  }
+
+  function latChart(name, st) {
+    var wrap = document.createElement('div');
+    var series = latSeries(name, st.range);
+    var hasData = series.some(function (s) { return s.points.some(function (p) { return p[1] !== null; }); });
+    if (!hasData) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
+      empty.textContent = (series.length === 0)
+        ? '未设置探针：在后台探针页填入地址并保存后，页面打开时开始采样画线。'
+        : '已有探针，暂无采样：保持页面打开，约 30 秒后开始出线。';
+      wrap.appendChild(empty);
+      return wrap;
+    }
+    var radius = st.range <= 6 ? 2 : 1;
+    var drawn = series.map(function (s) {
+      var raw = s.points.map(function (p) { return p[1]; });
+      var vals = raw;
+      if (st.despike) vals = latDespike(vals);
+      if (st.smooth) vals = latSmooth(s.points, vals, radius);
+      return { key: s.key, points: s.points, raw: raw, vals: vals };
+    });
+    var ymax = 0;
+    drawn.forEach(function (s) { s.vals.forEach(function (v) { if (v !== null && v > ymax) ymax = v; }); });
+    ymax = Math.max(50, Math.ceil(ymax * 1.1));
+    var t0 = Infinity, t1 = 0;
+    drawn.forEach(function (s) { s.points.forEach(function (p) { if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0]; }); });
+    if (t1 <= t0) t1 = t0 + 60;
+    var W = 600, H = 180, PL = 44, PR = 8, PT = 8, PB = 20;
+    var X = function (ts) { return PL + (ts - t0) / (t1 - t0) * (W - PL - PR); };
+    var Y = function (v) { return PT + (1 - v / ymax) * (H - PT - PB); };
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px';
+    [0, 0.5, 1].forEach(function (f) {
+      var y = PT + (1 - f) * (H - PT - PB);
+      var ln = document.createElementNS(svgNS, 'line');
+      ln.setAttribute('x1', PL); ln.setAttribute('x2', W - PR);
+      ln.setAttribute('y1', y); ln.setAttribute('y2', y);
+      ln.setAttribute('stroke', '#e5e7eb'); ln.setAttribute('stroke-width', '1');
+      svg.appendChild(ln);
+      var tx = document.createElementNS(svgNS, 'text');
+      tx.setAttribute('x', PL - 4); tx.setAttribute('y', y + 4);
+      tx.setAttribute('text-anchor', 'end'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
+      tx.textContent = Math.round(ymax * f) + 'ms';
+      svg.appendChild(tx);
+    });
+    var fmtT = function (ts) {
+      var d = new Date(ts * 1000);
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      return st.range >= 168
+        ? (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()))
+        : (p(d.getHours()) + ':' + p(d.getMinutes()));
+    };
+    [t0, (t0 + t1) / 2, t1].forEach(function (ts) {
+      var tx = document.createElementNS(svgNS, 'text');
+      tx.setAttribute('x', X(ts)); tx.setAttribute('y', H - 6);
+      tx.setAttribute('text-anchor', 'middle'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
+      tx.textContent = fmtT(ts);
+      svg.appendChild(tx);
+    });
+    drawn.forEach(function (s, idx) {
+      var color = latColor(s.key, idx);
+      var step = latMinStep(s.points);
+      var seg = [];
+      var flush = function () {
+        if (seg.length > 1) {
+          var pl = document.createElementNS(svgNS, 'polyline');
+          pl.setAttribute('points', seg.join(' '));
+          pl.setAttribute('fill', 'none'); pl.setAttribute('stroke', color);
+          pl.setAttribute('stroke-width', '1.5'); pl.setAttribute('stroke-linejoin', 'round');
+          svg.appendChild(pl);
+        } else if (seg.length === 1) {
+          var c = document.createElementNS(svgNS, 'circle');
+          var xy = seg[0].split(',');
+          c.setAttribute('cx', xy[0]); c.setAttribute('cy', xy[1]); c.setAttribute('r', '2');
+          c.setAttribute('fill', color);
+          svg.appendChild(c);
+        }
+        seg = [];
+      };
+      s.points.forEach(function (p, i) {
+        var v = s.vals[i];
+        if (v === null) { flush(); return; }
+        if (seg.length && isFinite(step) && p[0] - s.points[i - 1][0] > step * 2.5) flush();
+        seg.push(X(p[0]).toFixed(1) + ',' + Y(v).toFixed(1));
+      });
+      flush();
+    });
+    // Floating tooltip (batch 6): the old static line under the chart
+    // was easy to miss, and a handler on the overlay rect alone is
+    // fragile if anything sits above it — so the tip now follows the
+    // cursor (fixed position, pointer-events none so it never steals
+    // the mouse) and the handler lives on the svg itself, which every
+    // hover over the chart bubbles to. Tooltip values are raw bucket
+    // values, never despiked/smoothed (Prism's rule). The time prefix
+    // uses the first series that actually has points; an all-empty
+    // series list cannot throw on points[0].
+    var tip = document.createElement('div');
+    tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;white-space:nowrap;display:none';
+    var showTip = function (e) {
+      var rect = svg.getBoundingClientRect();
+      if (!rect.width) return;
+      var px = (e.clientX - rect.left) / rect.width * W;
+      var ts = t0 + (px - PL) / (W - PL - PR) * (t1 - t0);
+      var parts = drawn.map(function (s) {
+        var best = -1, bd = Infinity;
+        s.points.forEach(function (p, i) {
+          var d = Math.abs(p[0] - ts);
+          if (d < bd) { bd = d; best = i; }
+        });
+        var v = best >= 0 ? s.raw[best] : null;
+        return s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
+      });
+      var tSeries = null;
+      for (var si = 0; si < drawn.length; si++) {
+        if (drawn[si].points.length) { tSeries = drawn[si]; break; }
+      }
+      var t = tSeries ? tSeries.points.reduce(function (acc, p) {
+        return Math.abs(p[0] - ts) < Math.abs(acc - ts) ? p[0] : acc;
+      }, tSeries.points[0][0]) : null;
+      tip.textContent = (t !== null ? fmtT(t) + ' · ' : '') + parts.join(' · ');
+      tip.style.display = 'block';
+      tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 220) + 'px';
+      tip.style.top = Math.min(e.clientY + 12, window.innerHeight - 40) + 'px';
+    };
+    var hideTip = function () { tip.style.display = 'none'; };
+    var hover = document.createElementNS(svgNS, 'rect');
+    hover.setAttribute('x', PL); hover.setAttribute('y', 0);
+    hover.setAttribute('width', W - PL - PR); hover.setAttribute('height', H);
+    hover.setAttribute('fill', 'transparent');
+    svg.appendChild(hover);
+    svg.addEventListener('mousemove', showTip);
+    svg.addEventListener('mouseleave', hideTip);
+    var legend = document.createElement('div');
+    legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#374151;margin-top:4px';
+    drawn.forEach(function (s, idx) {
+      var last = null;
+      for (var i = s.raw.length - 1; i >= 0; i--) { if (s.raw[i] !== null) { last = s.raw[i]; break; } }
+      var item = document.createElement('span');
+      var dot = document.createElement('span');
+      dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;background:' + latColor(s.key, idx) + ';margin-right:3px';
+      item.appendChild(dot);
+      item.appendChild(document.createTextNode(s.key + (last !== null ? ' ' + last + 'ms' : ' —')));
+      legend.appendChild(item);
+    });
+    wrap.appendChild(legend);
+    wrap.appendChild(svg);
+    wrap.appendChild(tip);
+    return wrap;
+  }
+
+  function latControls(name, st) {
+    var bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px';
+    var mkBtn = function (label, active, fn) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'border:1px solid ' + (active ? '#f97316' : '#d1d5db') + ';background:' + (active ? '#f97316' : 'transparent') + ';color:' + (active ? '#fff' : '#374151') + ';border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer';
+      b.addEventListener('click', fn);
+      return b;
+    };
+    [[1, '1h'], [6, '6h'], [24, '24h'], [168, '7d']].forEach(function (r) {
+      bar.appendChild(mkBtn(r[1], st.range === r[0], function () { st.range = r[0]; inject(); }));
+    });
+    bar.appendChild(mkBtn('削峰', st.despike, function () { st.despike = !st.despike; inject(); }));
+    bar.appendChild(mkBtn('平滑', st.smooth, function () { st.smooth = !st.smooth; inject(); }));
+    return bar;
+  }
+
+  function summaryLine(s) {
+    var parts = [s.display];
+    parts.push((s.online4 || s.online6) ? '在线' : '离线');
+    if (s.location) parts.push(s.location);
+    parts.push('负载 ' + s.load_1 + ' / ' + s.load_5 + ' / ' + s.load_15);
+    if (typeof s.cpu === 'number') parts.push('CPU ' + (Math.round(s.cpu * 10) / 10) + '%');
+    if (s.memory_total > 0) parts.push('内存 ' + (Math.round(s.memory_used / s.memory_total * 1000) / 10) + '%');
+    return parts.join(' · ');
+  }
+
+  // Tabbed detail block (batch 5): summary row on top, then 网络延迟 /
+  // 系统概览 tabs. The latency tab carries the live probe lines, the
+  // range + 削峰/平滑 controls and the sampled chart; the overview tab
+  // carries detailLines (plan incl. end date, system, CPU, traffic,
+  // boot, online, activity, version, public note) — probe lines live
+  // only on the latency tab, so they are filtered out here defensively.
+  function renderDetailBlock(srv, block) {
+    var st = detailStateFor(srv.name);
+    var sum = document.createElement('div');
+    sum.style.cssText = 'font-size:12px;font-weight:600;color:#111827;margin-top:2px';
+    sum.textContent = summaryLine(srv);
+    block.appendChild(sum);
+    var tabs = document.createElement('div');
+    tabs.style.cssText = 'display:flex;gap:6px;margin-top:6px';
+    [['latency', '网络延迟'], ['overview', '系统概览']].forEach(function (t) {
+      var b = document.createElement('button');
+      b.textContent = t[1];
+      var active = st.tab === t[0];
+      b.style.cssText = 'border:1px solid ' + (active ? '#0a6cff' : '#d1d5db') + ';background:' + (active ? '#0a6cff' : 'transparent') + ';color:' + (active ? '#fff' : '#374151') + ';border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer';
+      b.addEventListener('click', function () { st.tab = t[0]; inject(); });
+      tabs.appendChild(b);
+    });
+    block.appendChild(tabs);
+    if (st.tab === 'latency') {
+      probeLines(srv).forEach(function (text) { block.appendChild(latLine(text)); });
+      block.appendChild(latControls(srv.name, st));
+      block.appendChild(latChart(srv.name, st));
+      var note = document.createElement('div');
+      note.style.cssText = 'font-size:11px;color:#9ca3af;margin-top:4px';
+      note.textContent = '曲线为浏览器实时采样：页面打开期间每 30 秒采一次实时值；关闭浏览器后历史从头采。7d 为小时均值。';
+      block.appendChild(note);
+    } else {
+      var probes = probeLines(srv);
+      detailLines(srv).forEach(function (text) {
+        if (probes.indexOf(text) >= 0) return; // probe lines live on the latency tab
+        block.appendChild(latLine(text));
+      });
+    }
+  }
+
+  // Batch 3: swap the main panel's 节点 (name) and 协议 (IPv4/IPv6
+  // badges) columns — protocol first, node second, everything else in
+  // place, contents untouched. The React bundle is precompiled, so the
+  // swap is a DOM reorder re-applied on every inject (React wipes
+  // foreign DOM on refresh). Idempotent: a row whose first cell is
+  // already the protocol cell (no alias div.truncate inside) is left
+  // alone, and the header is swapped only while it still reads 节点/协议.
+  function swapColumns() {
+    var table = document.getElementById('ssr-table');
+    if (!table) return;
+    var head = table.querySelector('thead tr');
+    if (head) {
+      var ths = head.querySelectorAll('th');
+      if (ths.length >= 2 && (ths[0].textContent || '').trim() === '节点'
+          && (ths[1].textContent || '').trim() === '协议') {
+        head.insertBefore(ths[1], ths[0]);
+      }
+    }
+    var rows = table.querySelectorAll('tbody tr');
+    rows.forEach(function (tr) {
+      if (tr.getAttribute && tr.getAttribute('data-ssr-detail-row')) return;
+      var tds = tr.querySelectorAll('td');
+      if (tds.length < 2) return; // React's own expand row: single colspan td
+      var first = tds[0];
+      if (first.querySelector && first.querySelector('div.truncate')) {
+        tr.insertBefore(tds[1], first);
+      }
+    });
+  }
+
+  // Hide React's own expanded detail block (the centered load/memory/
+  // swap/disk/TCP/UDP/latency block plus its #0/icon tail): the user
+  // asked to delete that part and keep only the overlay's tabbed
+  // block. The native nodes live in the same single colspan td as our
+  // block, so hide every direct child of the td except
+  // [data-ssr-detail] — no reliance on the native block's internal
+  // structure, so the #0/icon tail is hidden too. This runs on EVERY
+  // inject pass, open or collapsed: React recreates the native nodes
+  // on refresh, so a once-only hide would let them resurrect.
+  // Style-only changes do not trip the MutationObserver loop (it
+  // watches childList only), and the expand row itself is never
+  // touched, so expand/collapse keeps working.
+  function hideNativeDetail(reactTd) {
+    if (!reactTd) return;
+    Array.prototype.slice.call(reactTd.children).forEach(function (el) {
+      if (el.getAttribute && el.getAttribute('data-ssr-detail') != null) return;
+      if (el.style && el.style.display !== 'none') el.style.display = 'none';
+    });
+  }
+
+  function inject() {
+    var names = Object.keys(planByName);
+    if (!names.length) return;
+    // Batch 4: v7's separate detail rows are gone (relocated into
+    // React's own detail block, see below); drop any still in the
+    // DOM from the old script so they never stack under the new block.
+    Array.prototype.slice.call(document.querySelectorAll('tr[data-ssr-detail-row]')).forEach(function (r) {
+      if (r.parentNode) r.parentNode.removeChild(r);
+    });
+    renderPills();
+    swapColumns();
+    // Anchor: the alias cell div (class "truncate" inside a td).
+    var cells = document.querySelectorAll('td div.truncate');
+    var handled = new Set();
+    cells.forEach(function (div) {
+      // Strip our own indicator before matching: after the first inject
+      // the div text starts with ▸/▾, which is not part of the name.
+      var text = (div.textContent || '').trim().replace(/^[▸▾]/, '').trim();
+      var srv = null;
+      for (var i = 0; i < names.length; i++) {
+        var s = planByName[names[i]];
+        if (text === s.display) { srv = s; break; }
+      }
+      if (!srv) return;
+      var td = div.closest('td');
+      if (!td || handled.has(td)) return;
+      handled.add(td);
+      // React's own expand row, computed once per row (reused by the
+      // indicator and the detail attach below). React toggles
+      // expansion on a WHOLE-ROW click (bundle: tr onClick), while
+      // the overlay's click handler only fires on the alias cell —
+      // so a row click outside the alias cell expands React without
+      // touching expanded[]. The expand row's own class
+      // (visible/collapse) is therefore the source of truth, OR'd
+      // with the overlay map (the map covers the pre-render window:
+      // our click fires before React's class flips). The indicator
+      // follows the same OR, so it never disagrees with React.
+      var tr0 = td.closest('tr');
+      var expandRow = (tr0 && tr0.nextElementSibling) ? tr0.nextElementSibling : null;
+      var reactTd = null;
+      var reactOpen = false;
+      if (expandRow) {
+        var rtds0 = expandRow.querySelectorAll('td');
+        if (rtds0.length === 1) {
+          reactTd = rtds0[0];
+          reactOpen = /(^|\s)visible(\s|$)/.test(expandRow.className || '');
+        }
+      }
+      // Hide React's native detail block on every pass (see
+      // hideNativeDetail): pre-hiding while collapsed means no flash
+      // of the native block between a click and the next inject, and
+      // a React re-render can never resurrect it.
+      hideNativeDetail(reactTd);
+      var open = reactOpen || !!expanded[srv.name];
+      // Drop lines injected by the pre-fold overlay version, if any.
+      Array.prototype.slice.call(td.querySelectorAll('[data-ssr-kind]')).forEach(function (el) { el.remove(); });
+      // Expand/collapse indicator at the head of the name cell.
+      var ind = div.querySelector('[data-ssr-exp]');
+      if (!ind) {
+        ind = document.createElement('span');
+        ind.setAttribute('data-ssr-exp', '1');
+        ind.style.cssText = 'cursor:pointer;margin-right:4px;';
+        div.insertBefore(ind, div.firstChild);
+      }
+      var wantInd = open ? '▾' : '▸';
+      if (ind.textContent !== wantInd) ind.textContent = wantInd;
+      // Tag filter: hide rows outside the active pill's Tag. Unmapped
+      // rows (name not found in stats) always stay visible.
+      var tr = td.closest('tr');
+      var wantDisp = '';
+      if (tr) {
+        wantDisp = (activeTag !== null && (srv.tag || '') !== activeTag) ? 'none' : '';
+        if (tr.style.display !== wantDisp) tr.style.display = wantDisp;
+      }
+      // Main-panel location column: replace the place-name text with a
+      // flag image (batch 3). The React cell is td.w-11, the only cell
+      // of that width in the row. Only touch it when its text is this
+      // node's location and stats carries a country code — never guess
+      // a flag, and never touch a cell that does not match (bundle
+      // changes must fail safe, not clobber another column). React
+      // wipes foreign DOM on refresh, so re-apply when the marker is
+      // gone; the marker makes a second pass a no-op. This runs for
+      // every row, not just expanded ones (it sits before the early
+      // return below). The title keeps the place name on hover.
+      if (tr && srv.location && srv.country_code) {
+        var locTd = tr.querySelector('td.w-11');
+        if (locTd) {
+          var locText = (locTd.textContent || '').trim();
+          if ((locText === srv.location || locText.endsWith(srv.location))
+              && !locTd.querySelector('[data-ssr-flag]')) {
+            locTd.innerHTML = '';
+            var flag = document.createElement('img');
+            flag.setAttribute('data-ssr-flag', '1');
+            flag.src = 'https://flagcdn.com/w40/' + srv.country_code.toLowerCase() + '.png';
+            flag.alt = srv.country_code;
+            flag.title = srv.location;
+            flag.style.cssText = 'width:20px;vertical-align:middle';
+            flag.onerror = function () { this.style.display = 'none'; };
+            locTd.appendChild(flag);
+          }
+        }
+      }
+      // Detail block (batch 5, Prism port): the tabbed block lives
+      // INSIDE React's own expanded row — appended at the end of its
+      // single colspan td, while React's own centered detail block
+      // in the same td is hidden by hideNativeDetail above, so only
+      // the overlay block shows. No table row or cell of
+      // our own: batch 3's separate full-width row is gone, and
+      // nothing is ever crammed into the narrow name cell again.
+      // React wipes foreign DOM on refresh, so the block is
+      // re-attached on every inject (same pattern as the pills). If
+      // React's row is not in the DOM yet (it renders just after the
+      // click), nothing is rendered anywhere; the next
+      // MutationObserver pass attaches it. Block content is plain
+      // divs/buttons/svg (no div.truncate class) so the name-cell
+      // loop above never mistakes them for node rows. Present iff
+      // expanded, rebuilt only when its key changes (stats lines +
+      // tab/range/toggle state + latest sample); tab state lives in
+      // detailState (overlay JS), not in the DOM, so a React wipe +
+      // re-attach keeps the tab the user picked. A legacy in-cell
+      // block from an older overlay version is removed so the two
+      // never stack.
+      var legacy = td.querySelector('[data-ssr-detail]');
+      if (legacy) legacy.remove();
+      // reactTd/reactOpen/open were computed at the top of this row's
+      // pass (React's expand row: next sibling, single colspan td;
+      // any other shape is rejected, never attached into). The gate
+      // is `open`, not the overlay map alone: a whole-row click
+      // outside the alias cell expands React without touching
+      // expanded[], and gating on the map alone would render
+      // nothing — exactly the "tabs never appear" shape.
+      if (!open) {
+        if (reactTd) {
+          var stale = reactTd.querySelector('[data-ssr-detail]');
+          if (stale) stale.remove();
+        }
+        return;
+      }
+      if (!reactTd) return; // No single-td expand row; retry next inject.
+      var st = detailStateFor(srv.name);
+      var key = detailLines(srv).join('\n')
+        + '|tab=' + st.tab + '|range=' + st.range
+        + '|d=' + (st.despike ? 1 : 0) + '|s=' + (st.smooth ? 1 : 0)
+        + '|sample=' + (latLastSample[srv.name] || 0);
+      var block = reactTd.querySelector('[data-ssr-detail]');
+      if (block) {
+        if (block.getAttribute('data-ssr-key') === key) return;
+        block.parentNode.removeChild(block);
+        block = null;
+      }
+      block = document.createElement('div');
+      block.setAttribute('data-ssr-detail', '1');
+      block.setAttribute('data-ssr-key', key);
+      block.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid #e5e7eb;text-align:left';
+      renderDetailBlock(srv, block);
+      reactTd.appendChild(block);
+    });
+  }
+
+  function onDocClick(e) {
+    var t = e.target && e.target.closest ? e.target.closest('div.truncate') : null;
+    if (!t || !t.closest('td')) return;
+    var text = (t.textContent || '').trim().replace(/^[▸▾]/, '').trim();
+    var srv = null;
+    var names = Object.keys(planByName);
+    for (var i = 0; i < names.length; i++) {
+      var s = planByName[names[i]];
+      if (text === s.display) { srv = s; break; }
+    }
+    if (!srv) return;
+    // Deliberately no stopPropagation/preventDefault: React's own row
+    // click behaviour (if any) must keep working.
+    if (expanded[srv.name]) delete expanded[srv.name];
+    else expanded[srv.name] = true;
+    inject();
+  }
+
+  function refresh() {
+    fetch('/json/stats.json', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var map = {};
+        (j.servers || []).forEach(function (s) {
+          map[s.name] = {
+            name: s.name,
+            tag: s.tag || '',
+            display: (s.alias || s.name || '').trim(),
+            location: s.location || '',
+            country_code: s.country_code || '',
+            plan_start_date: s.plan_start_date || '',
+            plan_end_date: s.plan_end_date || '',
+            annual_fee: s.annual_fee || 0,
+            currency: s.currency || '$',
+            bandwidth_mbps: s.bandwidth_mbps || 0,
+            traffic_limit: s.traffic_limit || 0,
+            host_type: s.host_type || '',
+            online4: !!s.online4,
+            online6: !!s.online6,
+            latest_ts: s.latest_ts || 0,
+            version: s.version || '',
+            cpu: (typeof s.cpu === 'number') ? s.cpu : null,
+            memory_total: s.memory_total || 0,
+            memory_used: s.memory_used || 0,
+            swap_total: s.swap_total || 0,
+            swap_used: s.swap_used || 0,
+            hdd_total: s.hdd_total || 0,
+            hdd_used: s.hdd_used || 0,
+            month_rx: s.month_rx || 0,
+            month_tx: s.month_tx || 0,
+            total_rx: s.total_rx || 0,
+            total_tx: s.total_tx || 0,
+            month_used: s.month_used || 0,
+            load_1: s.load_1 || 0,
+            load_5: s.load_5 || 0,
+            load_15: s.load_15 || 0,
+            process_count: s.process_count || 0,
+            tcp_count: s.tcp_count || 0,
+            udp_count: s.udp_count || 0,
+            // uptime_sec = raw seconds (boot time); uptime_display =
+            // the formatted string ("N 天" / "HH:MM:SS", the stats
+            // "uptime" key). Never feed the string into bootLine.
+            uptime_sec: s.uptime_sec || 0,
+            uptime_display: s.uptime || '',
+            public_note: s.public_note || '',
+            sys_info: s.sys_info || null,
+            ping_probes: s.ping_probes || [],
+          };
+        });
+        planByName = map;
+        haveStats = true;
+        // Batch 5: sample every node's probes for the latency chart.
+        sampleLatency(j.servers || [], Math.floor(Date.now() / 1000));
+        renderPills();
+        inject();
+      })
+      .catch(function () { /* keep last map; retry next interval */ });
+  }
+
+  var timer = null;
+  function scheduleInject() {
+    if (timer) return;
+    timer = setTimeout(function () { timer = null; inject(); }, 300);
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    refresh();
+    setInterval(refresh, 30000);
+    document.addEventListener('click', onDocClick);
+    new MutationObserver(scheduleInject).observe(document.body, { childList: true, subtree: true });
+    setTimeout(inject, 1500);
+    setTimeout(inject, 5000);
+  });
+})();

@@ -26,3 +26,5 @@ sync.sh
 .server_status_sys_id
 venv
 tls
+# fork deploy artifact (built binary shipped separately, never committed)
+deploy/stat_server

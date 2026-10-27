@@ -11,7 +11,6 @@ use stat_common::server_status::server_status_server::{ServerStatus, ServerStatu
 use stat_common::server_status::StatRequest;
 
 use crate::config::Config;
-use crate::G_CONFIG;
 use crate::G_STATS_MGR;
 
 #[derive(Default)]
@@ -31,9 +30,23 @@ impl ServerStatus for ServerStatusSrv {
             }
         }
 
+        // Fork: push server-managed three-carrier probe settings to the
+        // client on every report (see admin.rs).
+        let ping = crate::admin::effective_ping();
         Ok(Response::new(server_status::Response {
             code: 0,
             message: "ok".to_string(),
+            ping_enabled: ping.enabled,
+            ping_cu: ping.cu_addr,
+            ping_ct: ping.ct_addr,
+            ping_cm: ping.cm_addr,
+            ping_cu_v6: ping.cu_addr_v6,
+            ping_ct_v6: ping.ct_addr_v6,
+            ping_cm_v6: ping.cm_addr_v6,
+            // This fork always manages probes, so clients can tell an
+            // explicit (possibly all-empty) config apart from an old
+            // server that sends no probe config at all.
+            ping_managed: true,
         }))
     }
 }
@@ -51,14 +64,12 @@ fn check_auth(req: Request<()>) -> Result<Request<()>, Status> {
             let tuple = token.to_str().unwrap_or("").split("@_@").collect::<Vec<_>>();
 
             if tuple.len() == 2 {
-                if let Some(cfg) = G_CONFIG.get() {
-                    if group_auth {
-                        if cfg.group_auth(tuple[0], tuple[1]) {
-                            return Ok(req);
-                        }
-                    } else if cfg.auth(tuple[0], tuple[1]) {
+                if group_auth {
+                    if crate::admin::check_group_auth(tuple[0], tuple[1]) {
                         return Ok(req);
                     }
+                } else if crate::admin::check_host_auth(tuple[0], tuple[1]) {
+                    return Ok(req);
                 }
             }
 

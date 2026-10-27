@@ -9,6 +9,7 @@ use prost::Message;
 use std::net::ToSocketAddrs;
 use std::process;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,10 +19,13 @@ use std::thread::sleep;
 use stat_common::server_status::{IpInfo, StatRequest, SysInfo};
 type GenericError = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, GenericError>;
+mod boot_id;
 mod geoip;
 mod grpc;
+mod icmp;
 mod status;
 mod sys_info;
+mod virt;
 mod vnstat;
 
 static CU: &str = "cu.tz.cloudcpp.com:80";
@@ -214,7 +218,60 @@ fn sample_all(args: &Args, stat_base: &StatRequest) -> StatRequest {
         }
     }
 
+    // Fork: real NIC addresses for the admin IP column (status::nic_addrs).
+    // sysinfo-gated: the deployed client builds with sysinfo, and the
+    // proto fields default to empty for other builds, where the admin
+    // falls back to the geoip query address.
+    #[cfg(feature = "sysinfo")]
+    {
+        let q = stat_rt
+            .ip_info
+            .as_ref()
+            .map(|i| i.query.as_str())
+            .unwrap_or("");
+        let (v4, v6) = status::nic_addrs(q);
+        stat_rt.ipv4 = v4;
+        stat_rt.ipv6 = v6;
+    }
+
+    // Fork auto-detect: detected values travel in separate fields so the
+    // server can apply explicit > backend > detected precedence. The
+    // geoip lookup itself runs on the existing hourly refresh_ip_info
+    // task (startup + hourly); a failed lookup simply leaves these empty
+    // and never blocks reporting.
+    if let Ok(o) = G_CONFIG.lock() {
+        if let Some(ip) = o.ip_info.as_ref() {
+            stat_rt.location_detected = detected_location(ip);
+        }
+    }
+    if let Some(t) = TYPE_DETECTED.get() {
+        stat_rt.type_detected = t.clone();
+    }
+
     stat_rt
+}
+
+/// Fork: virtualization type detected once at startup (see virt.rs).
+/// Empty when unsure; the server only uses it as a last resort.
+static TYPE_DETECTED: OnceLock<String> = OnceLock::new();
+
+/// Fork: short location label from geoip info, e.g. "United States
+/// Ashburn" or "Hong Kong". Duplicated parts are dropped; empty when the
+/// info itself is empty.
+fn detected_location(ip: &IpInfo) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !ip.country.is_empty() {
+        parts.push(ip.country.as_str());
+    }
+    let second = if !ip.city.is_empty() {
+        ip.city.as_str()
+    } else {
+        ip.region_name.as_str()
+    };
+    if !second.is_empty() && parts.last() != Some(&second) {
+        parts.push(second);
+    }
+    parts.join(" ")
 }
 
 fn http_report(args: &Args, stat_base: &mut StatRequest) -> Result<()> {
@@ -309,7 +366,22 @@ fn http_report(args: &Args, stat_base: &mut StatRequest) -> Result<()> {
                 .await
             {
                 Ok(resp) => {
-                    info!("report resp => {resp:?}");
+                    if let Ok(text) = resp.text().await {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            crate::status::apply_ping_config(
+                                v.get("ping_managed").and_then(|x| x.as_bool()).unwrap_or(false),
+                                v.get("ping_enabled").and_then(|x| x.as_bool()).unwrap_or(false),
+                                &get("ping_cu"),
+                                &get("ping_ct"),
+                                &get("ping_cm"),
+                                &get("ping_cu_v6"),
+                                &get("ping_ct_v6"),
+                                &get("ping_cm_v6"),
+                            );
+                        }
+                        info!("report resp => {text}");
+                    }
                 }
                 Err(err) => {
                     error!("report error => {err:?}");
@@ -351,6 +423,10 @@ async fn main() -> Result<()> {
     if args.debug {
         dbg!(&args);
     }
+
+    // Fork: detect the virtualization type once; unsure => "" (the server
+    // then leaves the type unset rather than showing a guess).
+    let _ = TYPE_DETECTED.set(virt::detect_type());
 
     if args.ip_info {
         let info = geoip::get_ip_info(&args).await?;
@@ -436,6 +512,8 @@ async fn main() -> Result<()> {
     if !args.location.is_empty() {
         stat_base.location = args.location.clone();
     }
+    // fork: stable boot id for server-side traffic accounting
+    stat_base.boot_id = boot_id::boot_id();
     // dbg!(&stat_base);
 
     if args.addr.starts_with("http") {

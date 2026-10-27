@@ -262,6 +262,21 @@ pub fn sample(args: &Args, stat: &mut StatRequest) {
         stat.ping_10086 = o.lost_rate.into();
         stat.time_10086 = o.ping_time.into();
     }
+    {
+        let o = &*status::G_PING_10010_V6.get().unwrap().lock().unwrap();
+        stat.ping_10010_v6 = o.lost_rate.into();
+        stat.time_10010_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*status::G_PING_189_V6.get().unwrap().lock().unwrap();
+        stat.ping_189_v6 = o.lost_rate.into();
+        stat.time_189_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*status::G_PING_10086_V6.get().unwrap().lock().unwrap();
+        stat.ping_10086_v6 = o.lost_rate.into();
+        stat.time_10086_v6 = o.ping_time.into();
+    }
 }
 
 pub fn collect_sys_info(args: &Args) -> SysInfo {

@@ -20,11 +20,12 @@ use tokio::signal;
 use axum::{
     http::{Method, Uri},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
 
+mod admin;
 mod assets;
 mod auth;
 mod config;
@@ -34,7 +35,10 @@ mod jinja;
 mod jwt;
 mod notifier;
 mod payload;
+mod ping_hist;
+mod registry;
 mod stats;
+mod traffic;
 
 static G_CONFIG: OnceCell<crate::config::Config> = OnceCell::new();
 static G_STATS_MGR: OnceCell<crate::stats::StatsMgr> = OnceCell::new();
@@ -54,16 +58,31 @@ struct Args {
 
 fn create_app_router() -> Router {
     let cors_layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_origin(Any);
 
     Router::new()
         .route("/report", post(http::report))
         .route("/json/stats.json", get(http::get_stats_json)) // 兼容就旧主题
-        // .route("/config.pub.json", get(http::get_site_config_json)) // TODO
+        // Fork: server-side probe latency history for the main-panel
+        // latency chart. Public and read-only like /json/stats.json:
+        // the main panel is unauthenticated, so putting this behind
+        // admin auth would break the chart.
+        .route("/api/ping-history", get(http::get_ping_history))
         .route("/api/admin/authorize", post(jwt::authorize))
+        .route("/api/admin/traffic", get(admin::get_traffic))
+        .route("/api/admin/hosts", get(admin::get_hosts))
+        .route("/api/admin/hosts/{name}/traffic", put(admin::put_host_traffic))
+        .route("/api/admin/hosts/{name}/traffic/correct", put(admin::put_host_traffic_correct))
+        .route("/api/admin/ping", get(admin::get_ping).put(admin::put_ping))
+        .route("/api/admin/hosts", post(admin::post_host))
+        .route("/api/admin/hosts/{name}", put(admin::put_host).delete(admin::delete_host))
+        .route("/api/admin/hosts/{name}/install", get(admin::get_host_install))
+        .route("/api/admin/groups", get(admin::get_groups).post(admin::post_group))
+        .route("/api/admin/groups/{gid}", put(admin::put_group).delete(admin::delete_group))
+        .route("/api/admin/notify/pushplus", get(admin::get_pushplus).put(admin::put_pushplus))
         .route("/api/admin/{path}", get(http::admin_api)) // stats.json || config.json
-        // .route("/admin", get(assets::admin_index_handler))
+        .route("/admin", get(assets::admin_index_handler))
         .route("/detail", get(http::get_detail))
         .route("/map", get(http::get_map))
         .route("/i", get(http::init_client))
@@ -134,6 +153,14 @@ async fn main() -> Result<(), anyhow::Error> {
         process::exit(1);
     }
 
+    // fork: admin overrides + traffic accounting state (before mgr init)
+    admin::init_admin_store();
+    traffic::load_traffic();
+    // fork: probe latency history (same directory, same style)
+    ping_hist::load();
+    // fork: pushplus runtime config (config.toml merged with admin.json)
+    notifier::pushplus::apply_pushplus_config(admin::effective_pushplus());
+
     // init tpl
     http::init_jinja_tpl().unwrap();
 
@@ -161,6 +188,9 @@ async fn main() -> Result<(), anyhow::Error> {
         let o = Box::new(notifier::webhook::Webhook::new(&cfg.webhook));
         notifies.lock().unwrap().push(o);
     }
+    // fork: pushplus is always registered; notify() itself gates on the
+    // runtime enabled flag + token, so the panel can enable it live.
+    notifies.lock().unwrap().push(Box::new(notifier::pushplus::PushPlus::new()));
     // init notifier end
 
     // notify test

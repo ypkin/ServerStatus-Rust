@@ -18,8 +18,10 @@ use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::icmp::{IcmpPinger, PingError};
 use crate::vnstat;
 use crate::Args;
+use stat_common::probe::normalize_probe_target;
 use stat_common::server_status::{DiskInfo, StatRequest};
 
 const SAMPLE_PERIOD: u64 = 1000; //ms
@@ -88,11 +90,154 @@ macro_rules! exec_shell_cmd_fetch_u32 {
     }};
 }
 
+/// Thread count from /proc, not `ps -eLf`: busybox ps (Alpine) has no
+/// -L flag, so that pipeline prints nothing, wc -l yields 0, and the
+/// old `0 - 2` wrapped to 4294967294 in release builds (seen live on
+/// the two Alpine nodes). /proc works identically on glibc and musl.
+/// Classification of an IPv4 NIC address for the admin IP column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V4Class {
+    /// Public address: reported as the node's real IPv4.
+    Public,
+    /// RFC1918/CGNAT address: only used when no public address exists
+    /// and the geoip egress address is unavailable.
+    Private,
+    /// Loopback, link-local, multicast, documentation, benchmarking or
+    /// reserved: never reported.
+    Skip,
+}
+
+/// Classify one IPv4 address for nic_addrs.
+/// The std helpers is_benchmarking/is_reserved/is_shared/is_documentation
+/// are still unstable on this toolchain, so the ranges are matched by
+/// octets directly: benchmarking 198.18/15, reserved 240/4, CGNAT
+/// 100.64/10, documentation 192.0.2/24 + 198.51.100/24 + 203.0.113/24,
+/// plus 0/8 ("this network"). is_private covers 10/8, 172.16/12 and
+/// 192.168/16 and is stable.
+pub fn classify_v4(ip: std::net::Ipv4Addr) -> V4Class {
+    let o = ip.octets();
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_link_local() {
+        return V4Class::Skip;
+    }
+    if o[0] == 0
+        || (o[0] == 198 && (o[1] & 0xfe) == 18)
+        || o[0] >= 240
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+    {
+        return V4Class::Skip;
+    }
+    if ip.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64) {
+        return V4Class::Private;
+    }
+    V4Class::Public
+}
+
+/// True for global unicast IPv6 (2000::/3). This excludes loopback
+/// (::1), link-local (fe80::/10), ULA (fc00::/7) and multicast
+/// (ff00::/8) by construction, so no separate checks are needed.
+/// The documentation prefix 2001:db8::/32 (RFC 3849) also lies inside
+/// 2000::/3, so it needs an explicit exclusion: it is never a real
+/// host address (exact once reported 2001:db8:1::1 as its v6).
+pub fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
+    let s = ip.segments();
+    s[0] & 0xe000 == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
+}
+
+/// Real NIC addresses for the admin IP column (fork).
+/// The old column only had the geoip egress IP (one address, almost
+/// always v4), so v6 was always —. Here:
+/// - v4 = first public NIC address (sorted, deterministic); if the box
+///   is behind NAT (NIC v4 is private), the geoip egress v4 wins, and
+///   only if that is missing does a private NIC address get used.
+/// - v6 = first global unicast NIC address (sorted, deterministic);
+///   a geoip v6 egress address is only a fallback when the NIC has none.
+/// Missing values stay empty; the admin falls back to the geoip query
+/// address, so old behaviour is preserved for old clients.
+/// sysinfo-gated: the caller only calls this with the sysinfo feature
+/// on; non-sysinfo builds keep empty addresses.
+#[cfg(feature = "sysinfo")]
+pub fn nic_addrs(geoip_query: &str) -> (String, String) {
+    use std::net::IpAddr;
+
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut v4_pub: Vec<String> = Vec::new();
+    let mut v4_priv: Vec<String> = Vec::new();
+    let mut v6: Vec<String> = Vec::new();
+    for (_name, data) in &networks {
+        for net in data.ip_networks() {
+            match net.addr {
+                IpAddr::V4(ip) => match classify_v4(ip) {
+                    V4Class::Public => v4_pub.push(ip.to_string()),
+                    V4Class::Private => v4_priv.push(ip.to_string()),
+                    V4Class::Skip => {}
+                },
+                IpAddr::V6(ip) => {
+                    if is_global_v6(ip) {
+                        v6.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    v4_pub.sort();
+    v4_priv.sort();
+    v6.sort();
+    let v4 = v4_pub
+        .into_iter()
+        .next()
+        .or_else(|| {
+            if !geoip_query.is_empty() && !geoip_query.contains(':') {
+                Some(geoip_query.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| v4_priv.into_iter().next())
+        .unwrap_or_default();
+    let v6 = v6
+        .into_iter()
+        .next()
+        .or_else(|| {
+            if !geoip_query.is_empty() && geoip_query.contains(':') {
+                Some(geoip_query.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    (v4, v6)
+}
+
+fn count_threads_from_proc() -> u32 {
+    let mut total: u64 = 0;
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in procs.flatten() {
+        let name = entry.file_name();
+        let is_pid = name
+            .to_str()
+            .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or(false);
+        if !is_pid {
+            continue;
+        }
+        if let Ok(tasks) = std::fs::read_dir(entry.path().join("task")) {
+            total += tasks.count() as u64;
+        }
+    }
+    total.min(u32::MAX as u64) as u32
+}
+
 pub fn tupd() -> (u32, u32, u32, u32) {
-    let t = exec_shell_cmd_fetch_u32!("ss -t | wc -l") - 1;
-    let u = exec_shell_cmd_fetch_u32!("ss -u | wc -l") - 1;
-    let p = exec_shell_cmd_fetch_u32!("ps -ef | wc -l") - 2;
-    let d = exec_shell_cmd_fetch_u32!("ps -eLf | wc -l") - 2;
+    // saturating_sub: a missing tool (or empty output) must report 0,
+    // never wrap into a bogus near-2^32 count.
+    let t = exec_shell_cmd_fetch_u32!("ss -t | wc -l").saturating_sub(1);
+    let u = exec_shell_cmd_fetch_u32!("ss -u | wc -l").saturating_sub(1);
+    let p = exec_shell_cmd_fetch_u32!("ps -ef | wc -l").saturating_sub(2);
+    let d = count_threads_from_proc();
 
     (t, u, p, d)
 }
@@ -292,86 +437,332 @@ pub struct PingData {
     pub probe_uri: String,
     pub lost_rate: u32,
     pub ping_time: u32,
+    /// Fork: server-managed on/off. False means "do not probe" (the
+    /// reported values then stay zero, like --disable-ping).
+    pub enabled: bool,
 }
 
-fn start_ping_collect_t(data: &Arc<Mutex<PingData>>) {
-    let mut package_list: LinkedList<i32> = LinkedList::new();
-    let mut package_lost: u32 = 0;
-    let pt = &*data.lock().unwrap();
-    let addr = pt
-        .probe_uri
+/// Rolling probe window. Semantics mirror the old inline code exactly:
+/// at most 100 samples, and loss only counts once more than 30 samples
+/// exist. Extracted so the timeout -> loss mapping is unit-testable.
+struct SampleWindow {
+    list: LinkedList<i32>,
+    lost: u32,
+}
+
+impl SampleWindow {
+    fn new() -> Self {
+        Self {
+            list: LinkedList::new(),
+            lost: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.list.clear();
+        self.lost = 0;
+    }
+
+    fn push(&mut self, ok: bool) {
+        if self.list.len() > 100 && self.list.pop_front().unwrap() == 0 {
+            self.lost -= 1;
+        }
+        if ok {
+            self.list.push_back(1);
+        } else {
+            self.lost += 1;
+            self.list.push_back(0);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn loss_rate(&self) -> u32 {
+        if self.list.is_empty() {
+            0
+        } else {
+            self.lost * 100 / u32::try_from(self.list.len()).unwrap_or(u32::MAX)
+        }
+    }
+}
+
+/// Resolve a bare probe host to an IP of the cell's family (v4/v6).
+/// The port is gone: ICMP pings a host, so resolution uses port 0.
+fn resolve_probe_host(host: &str, is_v6: bool) -> Option<std::net::IpAddr> {
+    (host, 0)
         .to_socket_addrs()
-        .unwrap()
-        .next()
-        .expect("can't get addr info");
-    info!("{} => {:?}", pt.probe_uri, addr);
+        .ok()?
+        .find(|a| a.is_ipv6() == is_v6)
+        .map(|a| a.ip())
+}
+
+/// Fork (ICMP probes): one echo sample per SAMPLE_PERIOD, TIMEOUT_MS
+/// timeout, same window/loss accounting as the old TCP-connect loop.
+/// A failed sample (timeout, unreachable, unresolvable, or no ICMP
+/// socket) counts as lost with `ping_time = TIMEOUT_MS`; a matched echo
+/// reply reports its real RTT. There is no TCP fallback anywhere here.
+fn start_ping_collect_t(data: &Arc<Mutex<PingData>>, is_v6: bool) {
+    let mut window = SampleWindow::new();
 
     let ping_data = data.clone();
-    thread::spawn(move || loop {
-        if package_list.len() > 100 && package_list.pop_front().unwrap() == 0 {
-            package_lost -= 1;
-        }
-
-        let instant = Instant::now();
-        match TcpStream::connect_timeout(&addr, Duration::from_millis(TIMEOUT_MS)) {
-            Ok(s) => {
-                let _ = s.shutdown(Shutdown::Both);
-                package_list.push_back(1);
+    thread::spawn(move || {
+        let mut cached_uri = String::new();
+        let mut cached_target: Option<std::net::IpAddr> = None;
+        let mut cached_pinger: Option<IcmpPinger> = None;
+        let mut pinger_error_logged = false;
+        let mut seq: u16 = 0;
+        loop {
+            let (uri, enabled) = {
+                let o = ping_data.lock().unwrap();
+                (o.probe_uri.clone(), o.enabled)
+            };
+            // Stored values may still carry a TCP-era port (or a CLI
+            // default with one); ICMP pings the bare host.
+            let target_str = normalize_probe_target(&uri);
+            if !enabled || target_str.is_empty() {
+                // Fork (batch 3, probe consistency): an idle cell must
+                // report nothing, not the last measurement from before
+                // the server emptied/disabled this probe. Without this
+                // reset, a client that probed the CLI defaults for one
+                // sample before the first server push kept reporting
+                // that stale latency forever (loss stuck at 0, because
+                // fewer than 30 samples ever accumulated).
+                if let Ok(mut o) = ping_data.lock() {
+                    o.ping_time = 0;
+                    o.lost_rate = 0;
+                }
+                window.clear();
+                cached_uri.clear();
+                cached_target = None;
+                cached_pinger = None;
+                pinger_error_logged = false;
+                thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                continue;
             }
-            Err(e) => {
-                // error!("{:?}", e);
-                if e.kind() == ConnectionRefused {
-                    package_list.push_back(1);
-                } else {
-                    package_lost += 1;
-                    package_list.push_back(0);
+            // Re-resolve whenever the server pushed a new probe address.
+            if cached_uri != uri || cached_target.is_none() {
+                match resolve_probe_host(&target_str, is_v6) {
+                    Some(ip) => {
+                        info!("{} => {:?}", target_str, ip);
+                        cached_uri = uri.clone();
+                        cached_target = Some(ip);
+                        cached_pinger = None;
+                        pinger_error_logged = false;
+                    }
+                    None => {
+                        // Unresolvable probe: count a lost sample, retry
+                        // next round instead of probing a stale address.
+                        window.push(false);
+                        if let Ok(mut o) = ping_data.lock() {
+                            o.ping_time = TIMEOUT_MS as u32;
+                            if window.len() > 30 {
+                                o.lost_rate = window.loss_rate();
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                        continue;
+                    }
+                }
+            }
+            if cached_pinger.is_none() {
+                match IcmpPinger::new(cached_target.unwrap()) {
+                    Ok(p) => {
+                        info!(
+                            "ICMP probe {} => {:?} via {:?} socket",
+                            target_str,
+                            cached_target.unwrap(),
+                            p.method
+                        );
+                        cached_pinger = Some(p);
+                    }
+                    Err(e) => {
+                        // Loud, not silent: without an ICMP socket this
+                        // cell cannot measure anything, and falling back
+                        // to TCP would resurrect the port-dependent
+                        // numbers this change removed.
+                        if !pinger_error_logged {
+                            error!(
+                                "ICMP probe {target_str}: cannot open ICMP socket ({e}); counting samples as lost, no TCP fallback"
+                            );
+                            pinger_error_logged = true;
+                        }
+                        window.push(false);
+                        if let Ok(mut o) = ping_data.lock() {
+                            o.ping_time = TIMEOUT_MS as u32;
+                            if window.len() > 30 {
+                                o.lost_rate = window.loss_rate();
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+                        continue;
+                    }
+                }
+            }
+            let pinger = cached_pinger.as_ref().unwrap();
+            seq = seq.wrapping_add(1);
+            match pinger.ping(seq, Duration::from_millis(TIMEOUT_MS)) {
+                Ok(rtt) => {
+                    window.push(true);
+                    if let Ok(mut o) = ping_data.lock() {
+                        o.ping_time = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
+                        if window.len() > 30 {
+                            o.lost_rate = window.loss_rate();
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Timeouts are routine (a filtered target costs one
+                    // per sample); anything else is worth a debug line.
+                    if let PingError::Io(ref io_err) = e {
+                        debug!("ICMP probe {target_str}: recv error {io_err}");
+                    }
+                    window.push(false);
+                    if let Ok(mut o) = ping_data.lock() {
+                        o.ping_time = TIMEOUT_MS as u32;
+                        if window.len() > 30 {
+                            o.lost_rate = window.loss_rate();
+                        }
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
+        }
+    });
+}
+
+/// Fork: apply server-pushed probe settings (see the server's report
+/// response). `managed` tells the two cases apart:
+/// - managed=false: an old server that sends no probe config at all.
+///   Keep the CLI settings (the pre-fork behavior).
+/// - managed=true: this fork's server, which always sends an explicit
+///   config (enabled + 6 addresses, possibly all empty). The server is
+///   authoritative: an empty address means "skip that probe/stack" (the
+///   cell idles on an empty URI), never a fallback to CLI defaults.
+/// A disabled server setting stops probing but keeps the addresses, so a
+/// later re-enable resumes without another client change.
+pub fn apply_ping_config(
+    managed: bool,
+    enabled: bool,
+    cu: &str,
+    ct: &str,
+    cm: &str,
+    cu_v6: &str,
+    ct_v6: &str,
+    cm_v6: &str,
+) {
+    if !managed {
+        return;
+    }
+    let apply = |cell: &OnceCell<Arc<Mutex<PingData>>>, addr: &str| {
+        if let Some(data) = cell.get() {
+            if let Ok(mut o) = data.lock() {
+                // Normalize on receipt too: a stored TCP-era value (or
+                // an old server) may still carry a port; the probe
+                // thread re-normalizes as well, this keeps the stored
+                // URI itself a bare host.
+                let addr = normalize_probe_target(addr);
+                // A changed target, a disabled probe, or an emptied
+                // address must not keep showing the previous target's
+                // numbers: reset so the next report reads 0 until fresh
+                // samples for the new target exist (the idle thread
+                // loop also zeroes, this makes the very next report
+                // correct even before that loop runs).
+                let changed = o.probe_uri != addr;
+                o.enabled = enabled;
+                if enabled {
+                    // Authoritative overwrite: empty idles the cell,
+                    // non-empty points it at the new address.
+                    o.probe_uri = addr.clone();
+                }
+                if !enabled || addr.is_empty() || changed {
+                    o.ping_time = 0;
+                    o.lost_rate = 0;
                 }
             }
         }
-        let time_cost_ms = instant.elapsed().as_millis();
-
-        if let Ok(mut o) = ping_data.lock() {
-            o.ping_time = u32::try_from(time_cost_ms).unwrap_or(u32::MAX);
-            if package_list.len() > 30 {
-                o.lost_rate = package_lost * 100 / u32::try_from(package_list.len()).unwrap_or(u32::MAX);
-            }
-        }
-
-        thread::sleep(Duration::from_millis(SAMPLE_PERIOD));
-    });
+    };
+    apply(&G_PING_10010, cu);
+    apply(&G_PING_189, ct);
+    apply(&G_PING_10086, cm);
+    apply(&G_PING_10010_V6, cu_v6);
+    apply(&G_PING_189_V6, ct_v6);
+    apply(&G_PING_10086_V6, cm_v6);
 }
 
 pub static G_PING_10010: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 pub static G_PING_189: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 pub static G_PING_10086: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+/// IPv6 probe cells. They start with an empty probe URI, so their threads
+/// idle (see `start_ping_collect_t`) until the server pushes a v6 address.
+pub static G_PING_10010_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+pub static G_PING_189_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
+pub static G_PING_10086_V6: OnceCell<Arc<Mutex<PingData>>> = OnceCell::new();
 
 pub fn start_all_ping_collect_t(args: &Args) {
+    let ping_enabled = !args.disable_ping;
+    // CLI defaults still carry TCP-era ports (cu.tz.cloudcpp.com:80);
+    // normalize to bare hosts, same as server-pushed values.
     G_PING_10010
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.cu_addr.clone(),
+            probe_uri: normalize_probe_target(&args.cu_addr),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
     G_PING_189
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.ct_addr.clone(),
+            probe_uri: normalize_probe_target(&args.ct_addr),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
     G_PING_10086
         .set(Arc::new(Mutex::new(PingData {
-            probe_uri: args.cm_addr.clone(),
+            probe_uri: normalize_probe_target(&args.cm_addr),
             lost_rate: 0,
             ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
+    // IPv6 cells: no CLI defaults (server-managed only); empty URI idles
+    // the thread until the server pushes a v6 address.
+    G_PING_10010_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
+    G_PING_189_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
+        })))
+        .unwrap();
+    G_PING_10086_V6
+        .set(Arc::new(Mutex::new(PingData {
+            probe_uri: String::new(),
+            lost_rate: 0,
+            ping_time: 0,
+            enabled: ping_enabled,
         })))
         .unwrap();
 
     if !args.disable_ping {
-        start_ping_collect_t(G_PING_10010.get().unwrap());
-        start_ping_collect_t(G_PING_189.get().unwrap());
-        start_ping_collect_t(G_PING_10086.get().unwrap());
+        start_ping_collect_t(G_PING_10010.get().unwrap(), false);
+        start_ping_collect_t(G_PING_189.get().unwrap(), false);
+        start_ping_collect_t(G_PING_10086.get().unwrap(), false);
+        start_ping_collect_t(G_PING_10010_V6.get().unwrap(), true);
+        start_ping_collect_t(G_PING_189_V6.get().unwrap(), true);
+        start_ping_collect_t(G_PING_10086_V6.get().unwrap(), true);
     }
 }
 
@@ -434,5 +825,87 @@ pub fn sample(args: &Args, stat: &mut StatRequest) {
         let o = &*G_PING_10086.get().unwrap().lock().unwrap();
         stat.ping_10086 = o.lost_rate.into();
         stat.time_10086 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_10010_V6.get().unwrap().lock().unwrap();
+        stat.ping_10010_v6 = o.lost_rate.into();
+        stat.time_10010_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_189_V6.get().unwrap().lock().unwrap();
+        stat.ping_189_v6 = o.lost_rate.into();
+        stat.time_189_v6 = o.ping_time.into();
+    }
+    {
+        let o = &*G_PING_10086_V6.get().unwrap().lock().unwrap();
+        stat.ping_10086_v6 = o.lost_rate.into();
+        stat.time_10086_v6 = o.ping_time.into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn v4_classification_covers_live_fleet_shapes() {
+        // Public egress of a normal VPS.
+        assert_eq!(classify_v4(Ipv4Addr::new(8, 8, 8, 8)), V4Class::Public);
+        // NAT boxes: RFC1918 and CGNAT are private, never skipped.
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(192, 168, 1, 1)),
+            V4Class::Private
+        );
+        assert_eq!(classify_v4(Ipv4Addr::new(10, 0, 0, 1)), V4Class::Private);
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(100, 64, 0, 1)),
+            V4Class::Private
+        );
+        // Never reported, whatever the box.
+        assert_eq!(classify_v4(Ipv4Addr::LOCALHOST), V4Class::Skip);
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(169, 254, 1, 1)),
+            V4Class::Skip
+        );
+        assert_eq!(
+            classify_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            V4Class::Skip
+        );
+    }
+
+    #[test]
+    fn sample_window_timeout_maps_to_loss() {
+        // Mirrors the probe loop: a failed sample (timeout, unreachable,
+        // unresolvable, no ICMP socket) pushes a 0 and counts as lost;
+        // loss only reports once more than 30 samples exist.
+        let mut w = SampleWindow::new();
+        for _ in 0..30 {
+            w.push(true);
+        }
+        assert_eq!(w.loss_rate(), 0);
+        // 31st sample fails: window > 30, loss = 1/31 -> 3%.
+        w.push(false);
+        assert_eq!(w.len(), 31);
+        assert_eq!(w.loss_rate(), 3);
+        // Window caps at 101 entries (pop once len > 100, before push).
+        for _ in 0..200 {
+            w.push(true);
+        }
+        assert_eq!(w.len(), 101);
+        // The single early loss has been pushed out by now.
+        assert_eq!(w.loss_rate(), 0);
+    }
+
+    #[test]
+    fn v6_global_unicast_only() {
+        assert!(is_global_v6("2401:8360:1:4f::a".parse().unwrap()));
+        assert!(is_global_v6("2001:470:18:aec::2".parse().unwrap()));
+        assert!(!is_global_v6("2001:db8:1::1".parse().unwrap()));
+        assert!(!is_global_v6("2001:db8::1".parse().unwrap()));
+        assert!(!is_global_v6(Ipv6Addr::LOCALHOST));
+        assert!(!is_global_v6("fe80::1".parse().unwrap()));
+        assert!(!is_global_v6("fc00::1".parse().unwrap()));
+        assert!(!is_global_v6("ff02::1".parse().unwrap()));
     }
 }

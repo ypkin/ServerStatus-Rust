@@ -97,18 +97,15 @@ where
             .await
             .map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
 
-        let mut auth_ok = false;
         let mut group_auth = false;
         if let Some(ssr_auth) = parts.headers.get("ssr-auth").and_then(|header| header.to_str().ok()) {
             group_auth = "group".eq(ssr_auth);
         }
-        if let Some(cfg) = G_CONFIG.get() {
-            if group_auth {
-                auth_ok = cfg.group_auth(basic_auth.username(), basic_auth.password());
-            } else {
-                auth_ok = cfg.auth(basic_auth.username(), basic_auth.password());
-            }
-        }
+        let auth_ok = if group_auth {
+            crate::admin::check_group_auth(basic_auth.username(), basic_auth.password())
+        } else {
+            crate::admin::check_host_auth(basic_auth.username(), basic_auth.password())
+        };
         if !auth_ok {
             return Err(StatusCode::UNAUTHORIZED.into_response());
         }

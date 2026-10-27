@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ServerStatus 后台</title>
+<style>
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:1280px;margin:0 auto;padding:16px;background:#f6f7f9;color:#222}
+h1{font-size:20px}h2{font-size:16px;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+th,td{border:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top}
+/* Node table readability (batch 3): the old global word-break:break-all
+   snapped names and addresses mid-word (56idc-hk -> 56id / c-hk).
+   Headers never wrap; key columns never break words; the table scrolls
+   horizontally instead of being squeezed into one screen. Note/remark
+   columns keep normal wrapping (breaks at spaces, never mid-word). */
+#hosts table{width:max-content;min-width:100%}
+#hosts th{white-space:nowrap}
+#hosts td.nw{white-space:nowrap}
+#hosts td.loc{white-space:nowrap}
+.ip-line{white-space:nowrap}
+.copybtn{padding:1px 6px;font-size:12px;margin-left:4px}
+.drag-handle{cursor:grab;user-select:none;white-space:nowrap}
+tr.dragging{opacity:.45}
+tr.drop-before{box-shadow:inset 0 2px 0 #0a6cff}
+tr.drop-after{box-shadow:inset 0 -2px 0 #0a6cff}
+input,select{padding:5px 7px;font-size:13px;margin:2px}
+button{padding:5px 12px;font-size:13px;cursor:pointer}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all;background:#f0f0f0;padding:8px}
+.card{background:#fff;border:1px solid #e3e3e3;padding:12px;margin:8px 0}
+label{display:inline-block;min-width:96px}
+.hint{color:#666;font-size:12px}
+.err{color:#c00}.ok{color:#080}
+#login{display:block}#app{display:none}
+.nav{background:#222;padding:8px 12px;display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.nav a,.nav button{background:transparent;border:0;color:#ddd;font-size:14px;cursor:pointer;padding:6px 12px;text-decoration:none}
+.nav a:hover,.nav button:hover{color:#fff}
+.nav button.active{background:#0a6cff;color:#fff;border-radius:4px}
+.nav .spacer{flex:1}
+.view{display:none}.view.active{display:block}
+.flag{font-size:16px}
+.flag-img{width:20px;vertical-align:middle}
+.pen{color:#16a34a;background:none;border:0;cursor:pointer;font-size:15px;padding:0 2px;line-height:1}
+</style>
+</head>
+<body>
+<h1>ServerStatus 后台</h1>
+<div id="login" class="card">
+  <label>管理员账号</label><input id="u" value="admin"> <label>密码</label><input id="p" type="password">
+  <button onclick="login()">登录</button> <span id="loginMsg" class="err"></span>
+  <p class="hint">账号密码来自 config.toml 的 admin 账号；登录 token 只存 sessionStorage，关掉页面即失效。</p>
+</div>
+<div id="app">
+  <div class="nav">
+    <button data-view="nodes" onclick="showView('nodes')">节点</button>
+    <button data-view="traffic" onclick="showView('traffic')">流量</button>
+    <button data-view="ping" onclick="showView('ping')">探针</button>
+    <button data-view="pushplus" onclick="showView('pushplus')">推送</button>
+    <button data-view="settings" onclick="showView('settings')">设置</button>
+    <span class="spacer"></span>
+    <a href="/">回主面板</a>
+    <button onclick="logout()">退出登录</button>
+  </div>
+  <span id="msg"></span>
+
+  <div id="view-nodes" class="view">
+    <h2>节点</h2>
+    <div class="card">
+      <label>服务器分组</label><select id="tag_filter" onchange="loadHosts()"><option value="">全部</option></select>
+      <button onclick="openHostForm('add')">添加节点</button>
+      <button onclick="batchDelHosts()">批量删除</button>
+      <button onclick="batchSetTag()">批量修改分组</button>
+      <button id="saveOrderBtn" onclick="saveOrder()" disabled>保存排序</button>
+      <span id="orderHint" class="hint">拖动 ☰ 换位后点保存排序才生效；筛选状态下不能排序，请先切回全部。</span>
+      <span class="hint">分组即 nezha 的 Tag：每台节点自由填写，前台按 Tag 分组，空 Tag 归默认组。</span>
+    </div>
+    <div style="overflow-x:auto"><div id="hosts"></div></div>
+    <div id="installBox" class="mono" style="display:none"></div>
+    <div id="hostFormCard" class="card" style="display:none">
+      <h3 id="hostFormTitle">添加节点</h3>
+      <label>节点名 *</label><input id="f_name" placeholder="如 cheap3"> <label>密码 *</label><input id="f_pass" placeholder="添加时必填；编辑时留空不改">
+      <label>显示名</label><input id="f_alias" placeholder="默认同节点名"><br>
+      <label>服务器分组 Tag</label><input id="f_tag" placeholder="如 Stable，空为默认组"><br>
+      <label>地区</label><input id="f_location"> <label>类型</label><input id="f_type" placeholder="如 kvm">
+      <label>排序</label><input id="f_weight" type="number" min="0" placeholder="留空自动"><br>
+      <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量"> <span class="hint">填 0 表示不限量</span>
+      <label>计费模式</label><select id="f_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
+      <label>重置日</label><input id="f_ms" type="number" min="1" max="31" value="1"><br>
+      <label>开始日期</label><input id="f_start" type="date"> <label>结束日期</label><input id="f_end" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><select id="f_bw_unit"><option value="1">Mbps</option><option value="1000">Gbps</option><option value="1000000">Tbps</option></select><br>
+      <label>备注</label><input id="f_note" size="40" placeholder="仅后台可见"> <label>公开备注</label><input id="f_pnote" size="40" placeholder="显示在主面板卡片上"><br>
+      <button onclick="saveHostForm()">保存</button> <button onclick="closeHostForm()">取消</button>
+      <div id="newInstall" class="mono" style="display:none"></div>
+    </div>
+  </div>
+
+  <div id="view-traffic" class="view">
+    <h2>流量设置与修正</h2>
+    <p class="hint">限额以 GiB 输入，接口以字节存储；修正会把已用（按计费模式）对齐到设定值（另一方向的本月计数保留），并盖当前周期戳，之后采集往上加；总计会自动补到不小于本月。</p>
+    <div id="traffic"></div>
+  </div>
+
+  <div id="view-ping" class="view">
+    <h2>三网 ping 探针（后台统一管，客户端下次上报自动生效，不用逐台改命令行）</h2>
+    <div class="card">
+      <label><input id="ping_enabled" type="checkbox" checked> 启用三网 ping</label>
+      <button onclick="savePingEnabled()">保存启用状态</button>
+      <div style="overflow-x:auto">
+      <div style="min-width:760px">
+        <div style="font-weight:bold;margin:12px 0 4px">IPv4</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          <div style="display:flex;gap:6px"><input id="ping_name_cu_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_ct_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cm_v4" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v4" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 1.2.3.4 或域名"></div>
+        </div>
+        <div style="font-weight:bold;margin:12px 0 4px">IPv6</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          <div style="display:flex;gap:6px"><input id="ping_name_cu_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cu',this.value)"> <input id="ping_addr_cu_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_ct_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('ct',this.value)"> <input id="ping_addr_ct_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
+          <div style="display:flex;gap:6px"><input id="ping_name_cm_v6" style="width:84px;flex:none;box-sizing:border-box" oninput="syncPingName('cm',this.value)"> <input id="ping_addr_cm_v6" style="flex:1;min-width:0;box-sizing:border-box" placeholder="如 2400::1 或域名（方括号也可）"></div>
+        </div>
+      </div>
+      </div>
+      <button onclick="savePingAll()" style="margin-top:12px">保存探针设置</button>
+      <p class="hint">名称和地址都由你定；地址空着就是没设置，不测也不显示。IPv6 留空表示该运营商不测 v6。探针是 ICMP ping，只测到主机的往返：填纯域名或 IP 即可，端口不再需要（带端口会被忽略）；不要带 http:// 这类协议头；IPv6 地址加不加方括号都行。</p>
+    </div>
+    <h2>探针总览（v4/v6 实测值）</h2>
+    <div class="card">
+      <button onclick="loadPingOverview()">刷新总览</button>
+      <span class="hint">主面板是预编译页面，只显示 v4 三个值；v6 值请在这里看。— 表示该项未探测（未配 v6 地址、节点无 v6，或暂未上报）。</span>
+      <div id="pingOverview"></div>
+    </div>
+  </div>
+
+  <div id="view-pushplus" class="view">
+    <h2>掉线推送（PushPlus）</h2>
+    <div class="card">
+      <label><input id="pp_enabled" type="checkbox"> 启用 PushPlus</label><br>
+      <label>PushPlus token</label><input id="pp_token" type="password" size="40" placeholder="留空表示不改">
+      <span id="pp_token_set" class="hint"></span><br>
+      <label>标题</label><input id="pp_title" placeholder="ServerStatus"> <label>渠道</label><input id="pp_channel" placeholder="wechat"><br>
+      <label>掉线模板</label><input id="pp_offline" size="60" placeholder="留空用默认文案：别名 (节点名) 掉线"><br>
+      <label>恢复模板</label><input id="pp_online" size="60"><br>
+      <button onclick="savePushPlus()">保存 PushPlus 设置</button>
+      <p class="hint">模板为空时：掉线/恢复用默认文案推送；自定义/流量告警模板为空则不发。token 只存服务端，不会在本页回显。</p>
+    </div>
+  </div>
+
+  <div id="view-settings" class="view">
+    <h2>设置</h2>
+    <div class="card">
+      <p>当前登录账号：admin</p>
+      <p>主面板：<a href="/">打开主面板</a>；节点、流量、探针、推送的设置分别在各自视图里改。</p>
+      <button onclick="logout()">退出登录</button>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let TOKEN = sessionStorage.getItem('ssr_admin_token') || '';
+const GiB = 1024*1024*1024;
+async function api(path, method='GET', body) {
+  const r = await fetch(path, {method, headers: {'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}, body: body?JSON.stringify(body):undefined});
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch(e) { j = {error:t}; }
+  if (!r.ok) {
+    // Unified auth-failure handling (previously only loadAll bounced):
+    // a token can die under a live tab — e.g. the container restarts and
+    // the JWT secret is re-generated — so ANY authed call may come back
+    // 401/403 ("Invalid token" is the server's 403). Bounce to the login
+    // form instead of leaving the page looking logged-in while every
+    // save fails with a cryptic error. The authorize call itself is
+    // exempt: a failed login must stay on the form with its own message.
+    if (path !== '/api/admin/authorize' && (r.status === 401 || r.status === 403)) backToLogin('登录已失效，请重新登录');
+    throw new Error(j.error || ('HTTP '+r.status));
+  }
+  return j;
+}
+function showMsg(s, ok=true){ const m=$('msg'); m.textContent=s; m.className = ok?'ok':'err'; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function showView(v){
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  const el = $('view-'+v); if (el) el.classList.add('active');
+  document.querySelectorAll('.nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+}
+// Flag image from a 2-letter country code, plus common name mapping for
+// hand-filled location text. Emoji regional indicators render as bare
+// letter codes (HK/US) in some browsers, so flags are <img> from
+// flagcdn (nezha does the same); unknown input yields no image, never
+// a guessed flag. onerror hides a missing file instead of a broken icon.
+function flagCode(code, text){
+  code = (code||'').toUpperCase();
+  if (/^[A-Z]{2}$/.test(code)) return code;
+  const t = (text||'').trim();
+  if (/^[A-Za-z]{2}$/.test(t)) return t.toUpperCase();
+  const low = t.toLowerCase();
+  for (const cc of Object.keys(COUNTRY_NAMES)) {
+    if (COUNTRY_NAMES[cc].some(n => low.includes(n))) return cc;
+  }
+  return '';
+}
+function flagImg(code, text){
+  const cc = flagCode(code, text);
+  if (!cc) return '';
+  return '<img class="flag-img" src="https://flagcdn.com/w40/' + cc.toLowerCase() + '.png" alt="' + cc + '" title="' + cc + '" onerror="this.style.display=\'none\'">';
+}
+const COUNTRY_NAMES = {
+  US:['united states','美国'], CN:['china','中国'], HK:['hong kong','香港'], TW:['taiwan','台湾'],
+  SG:['singapore','新加坡'], JP:['japan','日本'], KR:['korea','韩国'], NL:['netherlands','荷兰'],
+  DE:['germany','德国'], GB:['united kingdom','great britain','英国'], FR:['france','法国'],
+  CA:['canada','加拿大'], AU:['australia','澳大利亚'], RU:['russia','俄罗斯'], IN:['india','印度'],
+  BR:['brazil','巴西'], IT:['italy','意大利'], ES:['spain','西班牙'], SE:['sweden','瑞典'],
+  NO:['norway','挪威'], FI:['finland','芬兰'], DK:['denmark','丹麦'], PL:['poland','波兰'],
+  CZ:['czech','捷克'], AT:['austria','奥地利'], CH:['switzerland','瑞士'], BE:['belgium','比利时'],
+  IE:['ireland','爱尔兰'], PT:['portugal','葡萄牙'], TR:['turkey','土耳其'], ZA:['south africa','南非'],
+  MX:['mexico','墨西哥'], NZ:['new zealand','新西兰'], ID:['indonesia','印尼'], MY:['malaysia','马来西亚'],
+  TH:['thailand','泰国'], VN:['vietnam','越南'], PH:['philippines','菲律宾'], IL:['israel','以色列'],
+};
+
+async function login() {
+  try {
+    const j = await api('/api/admin/authorize','POST',{username:$('u').value, password:$('p').value});
+    // The authorize response carries `access_token` (jwt.rs AuthBody);
+    // `token` is only kept as a fallback for older servers.
+    TOKEN = j.access_token || j.token; sessionStorage.setItem('ssr_admin_token', TOKEN);
+    $('login').style.display='none'; $('app').style.display='block'; showView('nodes'); loadAll();
+  } catch(e){ $('loginMsg').textContent = '登录失败：'+e.message; }
+}
+function backToLogin(msg) {
+  TOKEN=''; sessionStorage.removeItem('ssr_admin_token');
+  $('app').style.display='none'; $('login').style.display='block';
+  if (msg) $('loginMsg').textContent = msg;
+}
+function logout(){ backToLogin(); }
+async function loadAll(){ try { await Promise.all([loadHosts(), loadTraffic(), loadPing(), loadPingOverview(), loadPushPlus()]); } catch(e){
+  // A stale/invalid token used to leave the user staring at empty tables.
+  // Bounce back to the login form instead so they can sign in again.
+  if (String(e.message).includes('Invalid token')) backToLogin('登录已失效，请重新登录');
+  else showMsg('加载失败：'+e.message, false);
+} }
+// --- nodes (nezha-style: table + shared add/edit form) ---
+let allHosts = [];
+let statsByName = {};
+let editingName = null;
+// IP cell: exactly two lines, v4 first, v6 second, each nowrap. The v6
+// line is shortened (head + … + tail, about as long as a v4 line) so a
+// long v6 address never wraps and inflates the row height; the column
+// is not widened. A missing stack shows "v6 —" with no copy button; a
+// present address gets its own copy button that copies the full bare
+// address (no v4/v6 prefix), with the full address on hover (title).
+// Input is a stats entry: prefer the client's real NIC addresses
+// (st.ipv4/st.ipv6, fork proto fields 56/57) and fall back to the single
+// geoip query address when the client has not reported them (old
+// client); a bare string argument still works as the old query path.
+// Batch 3 (corrected): the v6 row shows a shortened form — head and
+// tail kept, middle replaced by … — so it reads about as long as a
+// v4 row and never wraps and inflates the row height. The column is
+// NOT widened. Copy still copies the full address (data-ip), and
+// hovering shows the full address (title). v4 rows are untouched.
+function shortV6(addr){
+  if (addr.length <= 19) return addr;
+  return addr.slice(0, 10) + '…' + addr.slice(-8);
+}
+function ipCell(st){
+  let v4 = '', v6 = '';
+  if (st && typeof st === 'object') {
+    v4 = st.ipv4 || '';
+    v6 = st.ipv6 || '';
+    const q = st.ip_info && st.ip_info.query;
+    if (!v4 && q && !q.includes(':')) v4 = q;
+    if (!v6 && q && q.includes(':')) v6 = q;
+  } else if (st) {
+    if (st.includes(':')) v6 = st; else v4 = st;
+  }
+  function line(label, addr){
+    if (!addr) return '<span class="ip-line">' + label + ' —</span>';
+    const shown = (label === 'v6') ? shortV6(addr) : addr;
+    return '<span class="ip-line" title="' + esc(addr) + '">' + label + ' ' + esc(shown)
+      + ' <button class="copybtn" data-ip="' + esc(addr) + '" onclick="copyIp(this)">复制</button></span>';
+  }
+  return line('v4', v4) + '<br>' + line('v6', v6);
+}
+// Copy one bare IP. Clipboard API first, legacy textarea+execCommand as
+// fallback; a failure shows the address so it is never silently lost.
+async function copyIp(btn){
+  const addr = btn.dataset.ip; if (!addr) return;
+  const orig = btn.textContent;
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(addr); ok = true;
+    }
+  } catch(e){ /* fall through to legacy path */ }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = addr; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy'); ta.remove();
+    } catch(e2){ ok = false; }
+  }
+  if (!ok) { showMsg('复制失败，请手动复制：' + addr, false); return; }
+  btn.textContent = '已复制';
+  setTimeout(function(){ btn.textContent = orig; }, 1500);
+}
+async function loadHosts() {
+  const hosts = await api('/api/admin/hosts');
+  try {
+    const j = await api('/json/stats.json');
+    statsByName = {};
+    for (const s of (j.servers || [])) statsByName[s.name] = s;
+  } catch(e){ statsByName = {}; }
+  allHosts = hosts;
+  // Tag filter options from the tags actually in use (empty = Default).
+  const tags = [...new Set(hosts.map(h => h.tag || ''))].sort();
+  const sel = $('tag_filter');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部</option>' + tags.map(t => '<option value="'+esc(t)+'">'+esc(t || '默认')+'</option>').join('');
+  if (tags.includes(cur)) sel.value = cur; else sel.value = '';
+  const want = sel.value;
+  const rows = hosts.filter(h => want === '' || (h.tag || '') === want);
+  let html = '<table><tr><th></th><th><input type="checkbox" id="selAll" onclick="toggleAll(this)"></th><th>位置</th><th>节点</th><th>服务器分组</th><th>IP</th><th>版本号</th><th>限额 GiB</th><th>模式</th><th>重置日</th><th>开始/结束日期</th><th>年费</th><th>带宽</th><th>备注</th><th>公开备注</th><th>一键命令</th><th>管理</th></tr>';
+  for (const h of rows) {
+    const st = statsByName[h.name] || {};
+    const flag = flagImg(st.country_code, h.location);
+    const ver = st.version || (st.sys_info && st.sys_info.version) || '—';
+    const ip = ipCell(st);
+    const cur = (h.currency && h.currency.trim()) ? h.currency.trim() : '$';
+    const feeCell = (h.annual_fee > 0) ? esc(cur) + h.annual_fee : '—';
+    html += '<tr data-name="'+esc(h.name)+'"><td class="drag-handle" title="拖动排序">☰</td>'
+      + '<td><input type="checkbox" class="host-check" value="'+esc(h.name)+'"></td>'
+      + '<td>'+flag+'</td>'
+      + '<td class="nw">'+esc(h.name)+'</td><td class="nw">'+esc(h.tag || '默认')+'</td>'
+      + '<td>'+ip+'</td><td class="nw">'+esc(ver)+'</td>'
+      + '<td class="nw">'+limitCell(h.traffic_limit)+'</td><td class="nw">'+esc(h.traffic_mode)+'</td><td class="nw">'+h.monthstart+'</td>'
+      + '<td class="nw">'+esc(h.plan_start_date||'')+'<br>'+esc(h.plan_end_date||'')+'</td><td class="nw">'+feeCell+'</td><td class="nw">'+fmtBw(h.bandwidth_mbps||0)+'</td>'
+      + '<td>'+esc(h.note||'')+'</td><td>'+esc(h.public_note||'')+' <button class="pen" title="修改公开备注" onclick="editPublicNote(\''+h.name+'\')">✎</button></td>'
+      + '<td class="nw"><button onclick="showInstall(\''+h.name+'\')">一键命令</button></td>'
+      + '<td class="nw"><button onclick="openHostForm(\'edit\',\''+h.name+'\')">编辑</button> <button onclick="delHost(\''+h.name+'\')">删除</button></td></tr>';
+  }
+  $('hosts').innerHTML = html + '</table>';
+  wireRowDrag();
+  setOrderDirty(false);
+}
+// --- drag-sort (batch 3): dragging only reorders locally; nothing is
+// submitted until "保存排序" converts the order into weight values.
+// The handle is the only drag source, so checkbox/edit/delete clicks
+// can never start a drag; leaving the page needs no nag (fresh load
+// simply drops the unsaved order).
+let hostOrder = [];
+let orderDirty = false;
+let draggedName = null;
+function setOrderDirty(dirty){
+  orderDirty = dirty;
+  $('saveOrderBtn').disabled = !dirty || $('tag_filter').value !== '';
+  $('orderHint').textContent = dirty
+    ? '顺序已改动，点保存排序才生效（保存前不要切分组筛选）。'
+    : '拖动 ☰ 换位后点保存排序才生效；筛选状态下不能排序，请先切回全部。';
+}
+function wireRowDrag(){
+  const table = document.querySelector('#hosts table');
+  if (!table) return;
+  hostOrder = [...table.querySelectorAll('tr[data-name]')].map(tr => tr.dataset.name);
+  table.querySelectorAll('.drag-handle').forEach(cell => {
+    cell.addEventListener('mousedown', function(){
+      if ($('tag_filter').value !== '') return;
+      const tr = cell.closest('tr');
+      if (tr) tr.draggable = true;
+    });
+  });
+  document.addEventListener('mouseup', function(){
+    document.querySelectorAll('#hosts tr[draggable="true"]').forEach(tr => tr.draggable = false);
+  });
+  table.querySelectorAll('tr[data-name]').forEach(tr => {
+    tr.addEventListener('dragstart', function(e){
+      if ($('tag_filter').value !== '') { e.preventDefault(); return; }
+      draggedName = tr.dataset.name;
+      tr.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', draggedName); } catch(err){}
+    });
+    tr.addEventListener('dragend', function(){
+      tr.classList.remove('dragging');
+      table.querySelectorAll('tr').forEach(r => r.classList.remove('drop-before','drop-after'));
+      draggedName = null;
+    });
+    tr.addEventListener('dragover', function(e){
+      if (!draggedName || tr.dataset.name === draggedName) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = tr.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      tr.classList.toggle('drop-after', after);
+      tr.classList.toggle('drop-before', !after);
+    });
+    tr.addEventListener('dragleave', function(){
+      tr.classList.remove('drop-before','drop-after');
+    });
+    tr.addEventListener('drop', function(e){
+      e.preventDefault();
+      if (!draggedName || tr.dataset.name === draggedName) return;
+      const rect = tr.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      const draggedRow = table.querySelector('tr[data-name="' + draggedName + '"]');
+      if (!draggedRow) return;
+      if (after) tr.after(draggedRow); else tr.before(draggedRow);
+      hostOrder = [...table.querySelectorAll('tr[data-name]')].map(r => r.dataset.name);
+      setOrderDirty(true);
+    });
+  });
+}
+async function saveOrder(){
+  if (!orderDirty) return;
+  if ($('tag_filter').value !== '') { showMsg('先把分组筛选切回全部再保存排序', false); return; }
+  const n = hostOrder.length;
+  let ok = 0, fail = 0;
+  // Main panel sorts weight DESC (stats.rs), so the first row needs the
+  // largest weight; step 10 leaves room for later manual tweaks.
+  for (let i = 0; i < n; i++) {
+    try { await api('/api/admin/hosts/'+encodeURIComponent(hostOrder[i]),'PUT',{weight: (n - i) * 10}); ok++; }
+    catch(e){ fail++; }
+  }
+  if (fail === 0) { showMsg('修改成功'); setOrderDirty(false); loadHosts(); }
+  else showMsg('保存排序完成：成功 '+ok+' 台，失败 '+fail+' 台', false);
+}
+function toggleCurCustom(){
+  $('f_cur_custom').style.display = ($('f_cur').value === 'custom') ? '' : 'none';
+}
+function hostFormCurrency(){
+  if ($('f_cur').value === 'custom') return $('f_cur_custom').value.trim();
+  return $('f_cur').value;
+}
+// Unlimited traffic is spelled 0 only (see traffic::is_unlimited):
+// the table shows 不限量, the percent stays 0 server-side, and
+// alerts skip the node. A literal 9999 GiB shows as 9999.
+function isUnlimitedLimit(bytes){
+  return !bytes;
+}
+function limitCell(bytes){
+  return !bytes ? '不限量' : Math.round(bytes / GiB);
+}
+// Bandwidth display: adaptive unit, storage stays Mbps.
+// <1000 -> Mbps, >=1000 -> Gbps, >=1000000 -> Tbps; values are
+// trimmed (1.5Gbps, not 1.500Gbps) and never re-denominated on save.
+function fmtBw(mbps){
+  mbps = Number(mbps) || 0;
+  if (mbps >= 1000000) return trimNum(mbps / 1000000) + 'Tbps';
+  if (mbps >= 1000) return trimNum(mbps / 1000) + 'Gbps';
+  return mbps + 'Mbps';
+}
+function trimNum(v){
+  return String(Math.round(v * 1000) / 1000);
+}
+// Bandwidth form: number + unit select; the stored value is always
+// Mbps, converted on save (unit multipliers) and back on edit (the
+// largest unit that keeps the value exact to 3 decimals).
+function setBwForm(mbps){
+  mbps = mbps || 0;
+  let v = mbps, u = '1';
+  if (mbps >= 1000000) { v = trimNum(mbps / 1000000); u = '1000000'; }
+  else if (mbps >= 1000) { v = trimNum(mbps / 1000); u = '1000'; }
+  $('f_bw').value = v; $('f_bw_unit').value = u;
+}
+function bwFormMbps(){
+  return Math.round((parseFloat($('f_bw').value) || 0) * parseInt($('f_bw_unit').value));
+}
+function toggleAll(box){
+  document.querySelectorAll('.host-check').forEach(c => c.checked = box.checked);
+}
+// Shared selection for the batch actions (delete + set Tag): the row
+// checkboxes in the node table, nothing else.
+function selectedHostNames(){
+  return [...document.querySelectorAll('.host-check:checked')].map(c => c.value);
+}
+async function batchDelHosts(){
+  const names = selectedHostNames();
+  if (!names.length) { showMsg('先勾选要删除的节点', false); return; }
+  if (!confirm('批量删除 '+names.length+' 台节点？删除后节点立即从面板下线；客户端会鉴权失败，需另行停掉。')) return;
+  let ok = 0, fail = 0;
+  for (const n of names) {
+    try { await api('/api/admin/hosts/'+encodeURIComponent(n),'DELETE'); ok++; }
+    catch(e){ fail++; }
+  }
+  showMsg('批量删除完成：成功 '+ok+' 台'+(fail ? '，失败 '+fail+' 台' : ''), fail === 0);
+  loadHosts(); loadTraffic();
+}
+async function batchSetTag(){
+  const names = selectedHostNames();
+  if (!names.length) { showMsg('先勾选要修改分组的节点', false); return; }
+  // prompt() returns null on Cancel (abort) and '' on OK-with-empty,
+  // which is exactly "back to the default group" in Tag semantics.
+  const tag = prompt('将 ' + names.length + ' 台节点改到新分组，请输入 Tag（自由文本；留空归默认组）：', '');
+  if (tag === null) return;
+  let ok = 0, fail = 0;
+  for (const n of names) {
+    try { await api('/api/admin/hosts/'+encodeURIComponent(n),'PUT',{tag: tag}); ok++; }
+    catch(e){ fail++; }
+  }
+  showMsg('批量修改分组完成：成功 '+ok+' 台'+(fail ? '，失败 '+fail+' 台' : ''), fail === 0);
+  loadHosts();
+}
+function openHostForm(mode, name){
+  editingName = (mode === 'edit') ? name : null;
+  const card = $('hostFormCard');
+  $('hostFormTitle').textContent = (mode === 'edit') ? ('编辑节点 '+name) : '添加节点';
+  const box = $('newInstall'); box.style.display='none'; box.innerHTML='';
+  const set = (id, v) => { $(id).value = (v==null?'':v); };
+  if (mode === 'add') {
+    set('f_name',''); set('f_pass',''); set('f_alias',''); set('f_tag','');
+    set('f_location',''); set('f_type',''); set('f_weight','');
+    set('f_limit','0'); $('f_mode').value='sum'; set('f_ms','1');
+    set('f_start',''); set('f_end',''); set('f_fee',''); set('f_bw',''); $('f_bw_unit').value = '1'; set('f_note',''); set('f_pnote','');
+    $('f_cur').value = '$'; set('f_cur_custom',''); toggleCurCustom();
+    $('f_name').readOnly = false; $('f_pass').placeholder = '客户端密码（必填）';
+  } else {
+    const h = allHosts.find(x => x.name === name);
+    if (!h) { showMsg('节点不存在', false); return; }
+    set('f_name', h.name); set('f_pass',''); set('f_alias', h.alias); set('f_tag', h.tag||'');
+    set('f_location', h.location); set('f_type', h.type); set('f_weight', h.weight);
+    set('f_limit', Math.round(h.traffic_limit/GiB)); $('f_mode').value = h.traffic_mode; set('f_ms', h.monthstart);
+    set('f_start', h.plan_start_date||''); set('f_end', h.plan_end_date||''); set('f_fee', h.annual_fee||0); setBwForm(h.bandwidth_mbps||0);
+    const cur = (h.currency || '$').trim() || '$';
+    if (['$','¥','£','€'].includes(cur)) { $('f_cur').value = cur; set('f_cur_custom',''); }
+    else { $('f_cur').value = 'custom'; set('f_cur_custom', cur); }
+    toggleCurCustom();
+    set('f_note', h.note||''); set('f_pnote', h.public_note||'');
+    $('f_name').readOnly = true; $('f_pass').placeholder = '留空不改';
+  }
+  card.style.display='block'; card.scrollIntoView();
+}
+function closeHostForm(){ $('hostFormCard').style.display='none'; editingName = null; }
+async function saveHostForm(){
+  const v = id => $(id).value.trim();
+  const num = (id, dflt) => { const x = parseFloat($(id).value); return isNaN(x) ? dflt : x; };
+  try {
+    if (editingName) {
+      const body = {alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
+        monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
+        plan_start_date:$('f_start').value, plan_end_date:$('f_end').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
+        note:v('f_note'), public_note:v('f_pnote')};
+      const w = $('f_weight').value.trim();
+      if (w !== '') body.weight = parseInt(w);
+      const pw = $('f_pass').value;
+      if (pw !== '') body.password = pw;
+      await api('/api/admin/hosts/'+encodeURIComponent(editingName),'PUT',body);
+      showMsg('修改成功'); closeHostForm(); loadHosts(); loadTraffic();
+    } else {
+      const name = v('f_name');
+      if (!name) { showMsg('节点名不能为空', false); return; }
+      const pw = $('f_pass').value;
+      if (!pw) { showMsg('添加时密码不能为空', false); return; }
+      const body = {name:name, password:pw, alias:v('f_alias'), location:v('f_location'), type:v('f_type'), tag:v('f_tag'),
+        monthstart:parseInt($('f_ms').value)||1, traffic_limit:Math.round(num('f_limit',0)*GiB), traffic_mode:$('f_mode').value,
+        plan_start_date:$('f_start').value, plan_end_date:$('f_end').value, annual_fee:num('f_fee',0), currency:hostFormCurrency(), bandwidth_mbps:bwFormMbps(),
+        note:v('f_note'), public_note:v('f_pnote')};
+      const w = $('f_weight').value.trim();
+      if (w !== '') body.weight = parseInt(w);
+      const j = await api('/api/admin/hosts','POST',body);
+      const box = $('newInstall'); box.style.display='block';
+      box.innerHTML = '一键命令（在新机器上以 root 执行）：<br><br>'+j.install.install_command+'<br><br>已包含节点名与密码；执行后客户端自动下载、安装并上报。';
+      showMsg('节点已添加'); loadHosts(); loadTraffic();
+    }
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function showInstall(name) {
+  try {
+    const j = await api('/api/admin/hosts/'+encodeURIComponent(name)+'/install');
+    const box = $('installBox'); box.style.display='block';
+    box.innerHTML = name+' 的一键命令：<br><br>'+j.install_command+'<br><br>直接运行的客户端命令：<br>'+j.client_command;
+    box.scrollIntoView();
+  } catch(e){ showMsg('获取失败：'+e.message, false); }
+}
+async function delHost(name) {
+  if (!confirm('删除节点 '+name+'？删除后该节点立即从面板下线；其客户端会鉴权失败，需另行停掉。')) return;
+  try { const j = await api('/api/admin/hosts/'+encodeURIComponent(name),'DELETE'); showMsg('已删除 '+name+(j.note?'（'+j.note+'）':'')); loadHosts(); loadTraffic(); } catch(e){ showMsg('删除失败：'+e.message, false); }
+}
+// Direct public-note edit from the green pen in the note column. The
+// current text is looked up from allHosts (never interpolated into the
+// onclick attribute, so quotes in free text cannot break out), and the
+// PUT goes through the same host endpoint as the edit form; the report
+// thread copies it into HostStat, so the overlay detail shows it.
+async function editPublicNote(name) {
+  const h = allHosts.find(x => x.name === name);
+  if (!h) { showMsg('节点不存在', false); return; }
+  const val = prompt('修改公开备注（显示在主面板卡片上，留空则清除）：', h.public_note || '');
+  if (val === null) return;
+  try { await api('/api/admin/hosts/'+encodeURIComponent(name),'PUT',{public_note: val}); showMsg('公开备注已修改'); loadHosts(); } catch(e){ showMsg('修改失败：'+e.message, false); }
+}
+let trafficData = [];
+async function loadTraffic() {
+  const t = await api('/api/admin/traffic');
+  trafficData = t;
+  const opts = t.map(row => {
+    const label = (row.alias && row.alias !== row.name) ? (row.alias + ' (' + row.name + ')') : row.name;
+    return '<option value="'+row.name+'">'+label+'</option>';
+  }).join('');
+  $('traffic').innerHTML = '<label>节点</label><select id="traffic_node" onchange="showTrafficNode()">'+opts+'</select><div id="trafficDetail"></div>';
+  showTrafficNode();
+}
+function showTrafficNode() {
+  const sel = $('traffic_node');
+  if (!sel || !sel.value) { const d = $('trafficDetail'); if (d) d.innerHTML = ''; return; }
+  const row = trafficData.find(r => r.name === sel.value);
+  if (!row) { $('trafficDetail').innerHTML = ''; return; }
+  const gb = v => (v/GiB).toFixed(2);
+  $('trafficDetail').innerHTML = '<table><tr><th>今日</th><th>本月</th><th>总计</th><th>已用（按计费模式）</th><th>限额</th></tr>'
+    + '<tr><td>'+gb(row.day_rx+row.day_tx)+'</td><td>'+gb(row.month_rx+row.month_tx)+'</td><td>'+gb(row.total_rx+row.total_tx)+'</td><td>'+gb(row.month_used)+'</td><td>'+(isUnlimitedLimit(row.traffic_limit)?'不限量':gb(row.traffic_limit))+'</td></tr></table>'
+    + '<label>修正已用为 GiB</label><input id="traffic_corr" type="number" step="0.01" min="0" style="width:90px"> <button onclick="correctSelected()">修正</button>';
+}
+async function correctSelected() {
+  const name = $('traffic_node').value;
+  const v = parseFloat($('traffic_corr').value);
+  if (!(v >= 0)) { showMsg('修正值须为 >= 0 的数字', false); return; }
+  try {
+    await api('/api/admin/hosts/'+encodeURIComponent(name)+'/traffic/correct','PUT',{month_used:Math.round(v*GiB)});
+    showMsg(name+' 已修正'); await loadTraffic();
+    $('traffic_node').value = name; showTrafficNode();
+  } catch(e){ showMsg('修正失败：'+e.message, false); }
+}
+let pingState = null;
+// Two-row grid form: IPv4 row + IPv6 row, three carriers per row. The
+// name input is per carrier so it appears in both rows as synced twins
+// (editing either updates the other; the save reads the IPv4-row twin).
+function syncPingName(carrier, val) {
+  $('ping_name_'+carrier+'_v4').value = val;
+  $('ping_name_'+carrier+'_v6').value = val;
+}
+async function loadPing() {
+  const p = await api('/api/admin/ping');
+  pingState = {enabled: !!p.enabled};
+  $('ping_enabled').checked = pingState.enabled;
+  const set = (id, v) => { $(id).value = v || ''; };
+  set('ping_name_cu_v4', p.cu_name||'联通'); set('ping_name_cu_v6', p.cu_name||'联通');
+  set('ping_name_ct_v4', p.ct_name||'电信'); set('ping_name_ct_v6', p.ct_name||'电信');
+  set('ping_name_cm_v4', p.cm_name||'移动'); set('ping_name_cm_v6', p.cm_name||'移动');
+  set('ping_addr_cu_v4', p.cu_addr_v4||p.cu_addr||''); set('ping_addr_ct_v4', p.ct_addr_v4||p.ct_addr||''); set('ping_addr_cm_v4', p.cm_addr_v4||p.cm_addr||'');
+  set('ping_addr_cu_v6', p.cu_addr_v6||''); set('ping_addr_ct_v6', p.ct_addr_v6||''); set('ping_addr_cm_v6', p.cm_addr_v6||'');
+}
+function collectPingBody() {
+  const v = id => $(id).value.trim();
+  const body = {enabled: pingState ? pingState.enabled : true,
+    cu_name: v('ping_name_cu_v4'), ct_name: v('ping_name_ct_v4'), cm_name: v('ping_name_cm_v4'),
+    cu_addr_v4: v('ping_addr_cu_v4'), ct_addr_v4: v('ping_addr_ct_v4'), cm_addr_v4: v('ping_addr_cm_v4'),
+    cu_addr_v6: v('ping_addr_cu_v6'), ct_addr_v6: v('ping_addr_ct_v6'), cm_addr_v6: v('ping_addr_cm_v6')};
+  body.cu_addr = body.cu_addr_v4; body.ct_addr = body.ct_addr_v4; body.cm_addr = body.cm_addr_v4;
+  return body;
+}
+async function savePingAll() {
+  try {
+    await api('/api/admin/ping','PUT', collectPingBody());
+    showMsg('修改成功'); await loadPing(); loadPingOverview();
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function savePingEnabled() {
+  if (!pingState) return;
+  const body = collectPingBody(); body.enabled = $('ping_enabled').checked;
+  try {
+    await api('/api/admin/ping','PUT', body);
+    showMsg('修改成功'); await loadPing();
+  } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+async function loadPingOverview() {
+  try {
+    const [j, p] = await Promise.all([api('/json/stats.json'), api('/api/admin/ping')]);
+    const cu = p.cu_name||'联通', ct = p.ct_name||'电信', cm = p.cm_name||'移动';
+    const cell = (t, l) => (t > 0 || l > 0) ? (t + 'ms / ' + l + '%') : '—';
+    let html = '<table><tr><th>节点</th><th>'+cu+' v4</th><th>'+cu+' v6</th><th>'+ct+' v4</th><th>'+ct+' v6</th><th>'+cm+' v4</th><th>'+cm+' v6</th></tr>';
+    for (const s of (j.servers || [])) {
+      html += '<tr><td>' + (s.alias || s.name) + '</td>'
+        + '<td>' + cell(s.time_10010, s.ping_10010) + '</td><td>' + cell(s.time_10010_v6, s.ping_10010_v6) + '</td>'
+        + '<td>' + cell(s.time_189, s.ping_189) + '</td><td>' + cell(s.time_189_v6, s.ping_189_v6) + '</td>'
+        + '<td>' + cell(s.time_10086, s.ping_10086) + '</td><td>' + cell(s.time_10086_v6, s.ping_10086_v6) + '</td></tr>';
+    }
+    $('pingOverview').innerHTML = html + '</table>';
+  } catch(e){ $('pingOverview').innerHTML = '<span class="err">总览加载失败：' + e.message + '</span>'; }
+}
+async function loadPushPlus() {
+  const p = await api('/api/admin/notify/pushplus');
+  $('pp_enabled').checked = !!p.enabled; $('pp_title').value = p.title||''; $('pp_channel').value = p.channel||'';
+  $('pp_offline').value = p.offline_tpl||''; $('pp_online').value = p.online_tpl||'';
+  $('pp_token_set').textContent = p.token_set ? '（已设置 token，留空不改）' : '（未设置 token）';
+}
+async function savePushPlus() {
+  try { await api('/api/admin/notify/pushplus','PUT',{enabled:$('pp_enabled').checked, token:$('pp_token').value, title:$('pp_title').value.trim(), channel:$('pp_channel').value.trim(), offline_tpl:$('pp_offline').value, online_tpl:$('pp_online').value}); showMsg('PushPlus 设置已保存'); $('pp_token').value=''; loadPushPlus(); } catch(e){ showMsg('保存失败：'+e.message, false); }
+}
+if (TOKEN) { $('login').style.display='none'; $('app').style.display='block'; showView('nodes'); loadAll(); }
+</script>
+</body>
+</html>

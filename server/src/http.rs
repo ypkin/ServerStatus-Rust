@@ -30,10 +30,30 @@ pub async fn get_stats_json() -> impl IntoResponse {
     )
 }
 
-#[allow(unused)]
-pub fn get_site_config_json() -> impl IntoResponse {
-    // TODO
-    ([(header::CONTENT_TYPE, "application/json")], "{}")
+// Fork: server-side probe latency history for the main-panel chart.
+// Public and read-only, same as /json/stats.json (the main panel
+// has no login). Query: ?host=<name>&range=1h|6h|24h|7d.
+// 1h/6h/24h read minute buckets, 7d reads hour buckets. Unknown
+// hosts and bad ranges answer with an empty probe list (or the
+// 24 h default), never an error, so the chart just shows its
+// empty state.
+pub async fn get_ping_history(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let host = q.get("host").cloned().unwrap_or_default();
+    let range = q.get("range").cloned().unwrap_or_else(|| "24h".to_string());
+    let (week, window_secs) = ping_history_window(&range);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let probes = crate::ping_hist::query(&host, week, window_secs, now);
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        Json(json!({
+            "host": host,
+            "range": range,
+            "probes": probes,
+        })),
+    )
 }
 
 pub async fn admin_api(_claims: jwt::Claims, Path(path): Path<String>) -> Json<Value> {
@@ -85,15 +105,12 @@ pub async fn init_client(uri: Uri, req_header: HeaderMap, Query(params): Query<H
         return (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED.to_string()).into_response();
     }
 
-    // auth
-    let mut auth_ok = false;
-    if let Some(cfg) = G_CONFIG.get() {
-        if gid.is_empty() {
-            auth_ok = cfg.auth(uid, pass);
-        } else {
-            auth_ok = cfg.group_auth(gid, pass);
-        }
-    }
+    // auth (fork: admin-managed hosts/groups included)
+    let auth_ok = if gid.is_empty() {
+        crate::admin::check_host_auth(uid, pass)
+    } else {
+        crate::admin::check_group_auth(gid, pass)
+    };
     if !auth_ok {
         return (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED.to_string()).into_response();
     }
@@ -413,7 +430,7 @@ pub async fn get_detail(
 }
 
 // report
-pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -> impl IntoResponse {
+pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -> Response {
     let mut json_data: Option<serde_json::Value> = None;
 
     let content_type_header = req_header.get(header::CONTENT_TYPE);
@@ -440,20 +457,62 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
                 }
             }
         } else {
-            return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
         }
     }
 
     if json_data.is_none() {
         error!("{}", "Invalid json data!");
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
 
     if let Some(mgr) = G_STATS_MGR.get() {
         if mgr.report(json_data.unwrap()).is_err() {
-            return StatusCode::BAD_REQUEST;
+            return StatusCode::BAD_REQUEST.into_response();
         }
     }
 
-    StatusCode::OK
+    // Fork: push server-managed three-carrier probe settings to the client
+    // on every report (see admin.rs). Old clients ignore the body.
+    let ping = crate::admin::effective_ping();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ping_managed": true,
+            "ping_enabled": ping.enabled,
+            "ping_cu": ping.cu_addr,
+            "ping_ct": ping.ct_addr,
+            "ping_cm": ping.cm_addr,
+            "ping_cu_v6": ping.cu_addr_v6,
+            "ping_ct_v6": ping.ct_addr_v6,
+            "ping_cm_v6": ping.cm_addr_v6,
+        })),
+    )
+        .into_response()
+}
+
+/// Range parameter for /api/ping-history: (hour buckets?, window secs).
+/// 1h/6h/24h read minute buckets, 7d reads hour buckets; anything
+/// else falls back to 24 h minute buckets.
+fn ping_history_window(range: &str) -> (bool, i64) {
+    match range {
+        "1h" => (false, 3600),
+        "6h" => (false, 6 * 3600),
+        "7d" => (true, 7 * 24 * 3600),
+        _ => (false, 24 * 3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_history_window_picks_tier() {
+        assert_eq!(ping_history_window("1h"), (false, 3600));
+        assert_eq!(ping_history_window("6h"), (false, 6 * 3600));
+        assert_eq!(ping_history_window("24h"), (false, 24 * 3600));
+        assert_eq!(ping_history_window("7d"), (true, 7 * 24 * 3600));
+        assert_eq!(ping_history_window("bogus"), (false, 24 * 3600));
+    }
 }

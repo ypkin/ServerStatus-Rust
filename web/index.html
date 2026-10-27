@@ -13,7 +13,18 @@
     <link rel="apple-touch-icon" href="/logo192.svg" />
     <link rel="manifest" href="/manifest.json" />
     <title>ServerStatus-Rust</title>
-    <script defer="defer" src="/static/js/main.32884401.js"></script>
+    <script defer="defer" src="/static/js/main.93a593ab.js"></script>
+    <!-- Fork overlay: Tag pills + expandable node details (see plan-overlay.js).
+         Native script, no React rebuild; served from the same embedded web/.
+         PATH-VERSIONED filename (plan-overlay-vNN.js), NOT ?v=: this zone's
+         edge cache ignores query strings — ?v=10 served v7 bytes and ?v=12
+         served v7 bytes too, while a fresh path is a guaranteed cache MISS
+         that fetches the correct file from origin. On EVERY overlay change:
+         copy plan-overlay.js to plan-overlay-vNN.js (N+1) and point this
+         script tag at the new file. The unversioned plan-overlay.js stays
+         embedded (same content) so old cached HTML still gets a working
+         script instead of a 404. -->
+    <script defer="defer" src="/plan-overlay-v24.js"></script>
     <link href="/static/css/main.479df68b.css" rel="stylesheet">
 </head>
 

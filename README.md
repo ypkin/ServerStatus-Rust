@@ -31,6 +31,8 @@
 
 
 
+> 本仓库是 [zdz/ServerStatus-Rust](https://github.com/zdz/ServerStatus-Rust) 的 fork，工作分支为 `port/traffic-admin-ping`。上游文档见下文；本分支新增功能见文末「Fork 新增功能」。
+
 <h2>Table of Contents</h2>
 
 - [1. 介绍](#1-介绍)
@@ -567,3 +569,90 @@ OPTIONS:
 
     很高兴我的代码能跑在你的服务器上，如果对你有帮助的话，欢迎留下你的 star ⭐ 支持一下
 
+## Fork 新增功能（本分支 `port/traffic-admin-ping`）
+
+上游功能全部保留；以下为本分支在上游基础上的改动。部署时服务端与客户端均从本分支源码构建，**不要混用上游 Release 二进制**。
+
+### 后台管理 `/admin`
+
+用 `config.toml` 的 admin 账号登录，改动即时生效、无需重启，持久化在服务端 `admin.json`（0600），不改写 `config.toml`：
+
+- **节点表**：增删改节点、拖动排序（拖完点保存）、国旗图片、IP 两行显示 + 复制按钮、年费货币（¥ / $ / £ / € / 自定义）、带宽单位（Mbps / Gbps / Tbps，存 Mbps、自适应显示）、开始 / 结束日期、公开备注行内改、一键命令重新获取。
+- **分组**：后台可建分组模板（地区、类型、流量限额、套餐默认值）；客户端用 `-g 分组名 -p 分组密码` 接入即自动建节点；删除分组不踢出已注册成员。
+- **套餐**：节点与分组均可设开始日期、年费、带宽、流量限额；分组模板的套餐由新成员继承。
+- **流量修正**：表单填的是「已用」（按计费模式折算的量，不是入 + 出之和）；修正后已用精确等于填的值，之后采集往上加，总量只升不降且恒 ≥ 本月。
+- **三网 ping 设置**：后台改联通 / 电信 / 移动探针地址与开关，客户端下次上报自动生效，不用逐台改命令行。
+- **掉线推送 PushPlus**：后台填 token 即可启用（token 只存服务端、接口不回显），掉线 / 恢复有默认文案，模板为空时自定义 / 流量告警不发。
+
+### 流量统计与口径
+
+- 服务端累计日 / 月 / 总量，计费模式 `sum | up | down | max`（up 只计出方向、down 只计入方向、max 取大、空或未知归 sum），重置日 1–31 号（留空为自然月），重启重对齐与补记，额度告警（默认 80% 与 100% 两档），状态存 `traffic.json`。vnstat 节点保持原路，老客户端走旧基线。
+- **口径**：主面板「总流量」为网卡开机累计（`network_in / network_out`）；「月流量」为本月累计（`month_rx / month_tx`）；详情行只显示本月三项：已用 · 剩余 · 每月限制。
+- **不限量标记：`0` 表示不限量**（旧 `9999` 约定已退役，填 9999 即字面 9999 GiB）。
+- **结束日期绝不推导**：只显示后台填过的值，空永远是空；外部改动 `admin.json` 必须先停服务、改完再启动，否则下次后台保存会把内存旧值整文件写回。
+
+### 三网探针：ICMP
+
+探针为 ICMP echo，只测到主机的往返，不再依赖目标端口；配置里的端口自动剥离，旧地址无需重填。客户端 DGRAM 优先、RAW 兜底，打不开 socket 记丢包，**绝不回落 TCP**。探针历史由服务端持久化（六路分钟桶 25 小时 + 小时桶 8 天，桶内均值），公开接口 `GET /api/ping-history?host=&range=1h|6h|24h|7d`；历史只能从部署起攒，不编造。
+
+### 展开详情（主面板）
+
+点行展开后只显示摘要行 + 「网络延迟 / 系统概览」两个标签页（原生展开块已移除）：
+
+- 延迟图档位 1h / 6h / 24h / 7d，纵轴取整、横轴整点锚定加密；悬停竖排提示，竖虚线与提示列严格对齐、鼠标与触屏均可拖动 scrub，松手后停留到下一次悬停移动；断档列自动吸附到最近有值列。
+- 一次只能展开一个节点（手风琴）；暗模式下图表卡为深底浅字；行点击展开 / 收起由 React 自身 toggle，整行任意格子点击均可。
+
+### 前端定制方式
+
+仓库里**没有 React 源码**（只有编译产物），表格类定制走 overlay 注入：`web/` 下的 overlay 脚本经 RustEmbed 编进服务端二进制，改前端必须重构建服务端 + 重部署。版本化规则：overlay 用路径版本号（`plan-overlay-vNN.js`，新文件、旧文件保留防旧缓存 404）；bundle 用内容 md5 前 8 位新文件名。部署后必须公网按字节比对带版本号的文件，容器本机正确不等于浏览器拿到正确版。
+
+### 构建说明
+
+- 服务端为 glibc 动态版，Docker 底包须用 `ubuntu:24.04`；构建前先 `touch server/build.rs`，否则 banner 里的提交号可能缓存成旧值。
+- 客户端分发**只用 musl 静态版**（`x86_64-unknown-linux-musl`），动态版在 glibc 较低的机器上起不来。
+- 启动日志不打印后台账号与密码；鉴权响应字段名为 `access_token`。
+
+
+## Docker Compose 部署
+
+创建 `docker-compose.yml` 文件：
+
+```yaml
+services:
+  serverstatus:
+    image: ghcr.io/ypkin/serverstatus-rust:latest
+    container_name: serverstatus-rust
+    restart: unless-stopped
+    ports:
+      - "8080:8080"     # Web 管理面板与前台访问端口
+      - "35601:35601"   # 客户端上报端口
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      - TZ=Asia/Shanghai
+```
+
+启动命令：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
+### 第三步：切换 Remote、提交并推送
+
+由于仓库需要推送到你自己的 GitHub 账号下：
+
+1. **在 GitHub 网页新建你自己的仓库**（例如 `ServerStatus-Rust`）。
+2. **将本地仓库的远程地址改为你自己的仓库**：
+
+```bash
+# 检查当前远程地址
+git remote -v
+
+# 替换 origin 为你自己的仓库地址（SSH 或 HTTPS 均可）
+git remote set-url origin git@github.com:<你的用户名>/ServerStatus-Rust.git
+# 或者如果是 HTTPS:
+# git remote set-url origin https://github.com/<你的用户名>/ServerStatus-Rust.git

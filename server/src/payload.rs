@@ -32,6 +32,14 @@ pub struct HostStat {
     pub uptime: u64,
     #[serde(rename(serialize = "uptime"), skip_deserializing)]
     pub uptime_str: String,
+    // Fork (batch 3, cdt detail fix): the real uptime in seconds, kept as
+    // its own key. The "uptime" JSON key above is the formatted string
+    // ("N 天" / "HH:MM:SS"), so an overlay that read it as seconds got
+    // NaN and printed "NaN-NaN-NaN NaN:NaN" for the boot time. Never
+    // derive a boot time from the formatted string; use this field, and
+    // hide the boot row when it is 0/missing.
+    #[serde(default)]
+    pub uptime_sec: u64,
 
     pub load_1: f64,
     pub load_5: f64,
@@ -43,6 +51,22 @@ pub struct HostStat {
     pub time_10010: f64,
     pub time_189: f64,
     pub time_10086: f64,
+
+    // Fork: IPv6 three-carrier probe results (loss % / latency ms).
+    // Zero means "not probed" (no v6 address configured, or an old client).
+    // Defaults keep old clients' reports deserializing.
+    #[serde(default)]
+    pub ping_10010_v6: f64,
+    #[serde(default)]
+    pub ping_189_v6: f64,
+    #[serde(default)]
+    pub ping_10086_v6: f64,
+    #[serde(default)]
+    pub time_10010_v6: f64,
+    #[serde(default)]
+    pub time_189_v6: f64,
+    #[serde(default)]
+    pub time_10086_v6: f64,
 
     #[serde(rename(deserialize = "tcp"))]
     pub tcp_count: u32,
@@ -62,6 +86,87 @@ pub struct HostStat {
     pub last_network_in: u64,
     #[serde(default)]
     pub last_network_out: u64,
+
+    // Fork: client-reported boot identifier (never serialized out: it is an
+    // internal accounting key, not public data).
+    #[serde(default, skip_serializing)]
+    pub boot_id: String,
+
+    // Fork: client auto-detection (see stats.rs precedence). Detected
+    // values only fill in when neither an explicit client value nor a
+    // backend host value exists; they are resolved into location/type
+    // before stats are served, so they never appear in stats.json.
+    #[serde(default, skip_serializing)]
+    pub location_detected: String,
+    #[serde(default, skip_serializing)]
+    pub type_detected: String,
+
+    // Fork: server-side traffic accounting (see traffic.rs). Set by the
+    // server on every report; all default to zero for old clients/themes.
+    #[serde(default)]
+    pub month_rx: u64,
+    #[serde(default)]
+    pub month_tx: u64,
+    #[serde(default)]
+    pub day_rx: u64,
+    #[serde(default)]
+    pub day_tx: u64,
+    #[serde(default)]
+    pub total_rx: u64,
+    #[serde(default)]
+    pub total_tx: u64,
+    /// This period's usage under the host's traffic_mode.
+    #[serde(default)]
+    pub month_used: u64,
+    /// Configured allowance in bytes, 0 = unlimited.
+    #[serde(default)]
+    pub traffic_limit: u64,
+    #[serde(default)]
+    pub traffic_mode: String,
+    /// month_used as a percentage of traffic_limit, 0 when unlimited.
+    #[serde(default)]
+    pub traffic_percent: u64,
+    #[serde(default)]
+    pub month_start: String,
+
+    // Fork: plan display (see web/plan-overlay.js). Copied from the
+    // registered Host record on every report; empty/zero = unset, never
+    // fabricated (in particular no expiry date is derived here).
+    #[serde(default)]
+    pub plan_start_date: String,
+    /// End date, copied from the Host record like the start date (see
+    /// stats.rs). Empty = unset; never derived, never fabricated.
+    #[serde(default)]
+    pub plan_end_date: String,
+    #[serde(default)]
+    pub annual_fee: f64,
+    /// Currency symbol for annual_fee, copied from the Host record
+    /// (fork). Empty on old stats means "$" (see stats.rs copy).
+    #[serde(default)]
+    pub currency: String,
+    #[serde(default)]
+    pub bandwidth_mbps: u32,
+
+    // Fork: nezha-style display group tag (free text, backend-managed).
+    // Distinct from gid (auth/template membership): tag never affects
+    // auth, it only drives admin filtering and main-panel grouping.
+    #[serde(default)]
+    pub tag: String,
+    // Fork: public note, shown on main panel cards via the overlay.
+    #[serde(default)]
+    pub public_note: String,
+    // Fork: client-reported version (StatRequest.version, e.g. 1.8.2).
+    // Flows through the serde report conversion; empty for clients that
+    // do not report one, never fabricated.
+    #[serde(default)]
+    pub version: String,
+    // Fork: real NIC addresses (StatRequest.ipv4/ipv6, proto fields 56/57).
+    // Empty for old clients; the admin IP cell then falls back to the
+    // single geoip query address.
+    #[serde(default)]
+    pub ipv4: String,
+    #[serde(default)]
+    pub ipv6: String,
 
     pub cpu: f64,
     pub memory_total: u64,

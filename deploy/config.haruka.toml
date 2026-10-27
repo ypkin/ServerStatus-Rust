@@ -1,0 +1,56 @@
+# SSR panel config for haruka (copy to ./data/config.toml at deploy time).
+# Nodes and groups are managed in the /admin panel afterwards, so hosts
+# and hosts_group start empty here.
+grpc_addr = "0.0.0.0:9394"
+http_addr = "0.0.0.0:8080"
+offline_threshold = 30
+grpc_tls = 0
+tls_dir = "tls"
+workspace = "/data"
+
+# Admin login for /admin and /detail. Deploy step replaces the placeholders
+# with a generated password and reports it once; change it here any time.
+admin_user = "__ADMIN_USER__"
+admin_pass = "__ADMIN_PASS__"
+
+# JWT signing secret: set this to a stable random value at deploy time.
+# If left empty, the server generates a fresh secret on every start,
+# which invalidates all logged-in admin sessions on each container
+# restart (the next save then fails with "Invalid token"). The live
+# value lives only in the deployed data/config.toml, never in the repo.
+# jwt_secret = "__JWT_SECRET__"
+
+# Public report URL: agents use https://ssr.passall.us/report, and the
+# panel derives one-click install links from this origin.
+server_url = "https://ssr.passall.us/report"
+
+hosts = []
+hosts_group = []
+group_gc = 30
+notify_interval = 30
+
+# Three-carrier probes (panel-overridable at runtime, see /admin).
+# No prefilled addresses: empty = unset, and unset probes are skipped.
+[ping]
+enabled = true
+cu_name = "联通"
+ct_name = "电信"
+cm_name = "移动"
+cu_addr = ""
+ct_addr = ""
+cm_addr = ""
+cu_addr_v6 = ""
+ct_addr_v6 = ""
+cm_addr_v6 = ""
+
+# PushPlus offline alerts: disabled until the panel owner enables it in
+# /admin with their own token (token is never returned by any API).
+[pushplus]
+enabled = false
+token = ""
+title = "ServerStatus"
+channel = "wechat"
+online_tpl = ""
+offline_tpl = ""
+custom_tpl = ""
+traffic_tpl = ""

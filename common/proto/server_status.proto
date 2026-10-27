@@ -112,11 +112,57 @@ message StatRequest {
   // false: KiB (1024), true: KB (1000)
   bool si = 45;
   repeated DiskInfo disks = 46;
+  // Fork extension: stable boot identifier, e.g. "<boot_epoch>/<iface_digest>".
+  // Empty means "unknown" (old / python clients): the server then falls back
+  // to its legacy baseline accounting instead of accumulate().
+  string boot_id = 47;
+
+  // Fork extension: IPv6 three-carrier probe results, same carriers as
+  // fields 13-18 (loss % / latency ms). Zero means "not probed": no v6
+  // address configured, or an old client that does not report v6.
+  double ping_10010_v6 = 48;
+  double ping_189_v6 = 49;
+  double ping_10086_v6 = 50;
+  double time_10010_v6 = 51;
+  double time_189_v6 = 52;
+  double time_10086_v6 = 53;
+
+  // Fork extension: client auto-detection (see stats.rs precedence).
+  // These are detected values, NOT explicit ones: the server only uses
+  // them when neither an explicit client value nor a backend host value
+  // exists, so explicit settings always win.
+  string location_detected = 54;
+  string type_detected = 55;
+
+  // Fork extension: real NIC addresses for the admin IP column.
+  // The old column only had ip_info.query (one geoip egress IP, almost
+  // always v4), so v6 was always —. ipv4 prefers a public NIC address
+  // and falls back to the geoip egress v4 on NAT boxes; ipv6 is a
+  // global unicast NIC address. Empty = not reported (old client):
+  // the admin then falls back to the query address.
+  string ipv4 = 56;
+  string ipv6 = 57;
 }
 
 message Response {
   int32 code = 1;
   string message = 2;
+  // Fork extension: server-managed three-carrier probe settings, pushed to
+  // the client on every report. Empty addresses mean "keep client args".
+  bool ping_enabled = 3;
+  string ping_cu = 4;
+  string ping_ct = 5;
+  string ping_cm = 6;
+  // Fork extension: IPv6 probes, same three carriers. Old clients ignore
+  // unknown fields; empty means "do not probe v6 for that carrier".
+  string ping_cu_v6 = 7;
+  string ping_ct_v6 = 8;
+  string ping_cm_v6 = 9;
+  // Fork extension: true when the server manages probes (this fork always
+  // sends it). Old servers never send it, so a client can tell "server
+  // sent an explicit probe config, possibly all empty" apart from "old
+  // server, keep CLI defaults": only the latter keeps CLI behavior.
+  bool ping_managed = 10;
 }
 
 service ServerStatus { rpc Report(StatRequest) returns (Response); }
