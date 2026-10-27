@@ -1,7 +1,7 @@
 # =========================
 # Stage 1: Build stage
 # =========================
-FROM rust:1.80-bullseye AS builder
+FROM rust:1.99-bookworm AS builder
 
 WORKDIR /usr/src/serverstatus
 
@@ -11,28 +11,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制源码并编译
+# 复制源码并编译（只编服务端；客户端不进最终镜像，不编它）
 COPY . .
-RUN cargo build --release
+RUN cargo build --release -p stat_server
 
 # =========================
 # Stage 2: Runtime stage
 # =========================
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# 安装基础运行依赖
+# 安装基础运行依赖（bookworm 的 OpenSSL 3 对应 libssl3）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    openssl \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制编译产物
 COPY --from=builder /usr/src/serverstatus/target/release/stat_server /app/stat_server
 
-EXPOSE 8080 35601
+EXPOSE 8080 9394
 
 ENV TZ=Asia/Shanghai
 
