@@ -12,9 +12,10 @@
 // node summary line, then 网络延迟 / 系统概览 tabs. The latency tab
 // carries the live probe lines plus a Prism-ported chart (1h/6h/24h/7d
 // ranges, 削峰/平滑 toggles, one line per user-named probe, v4/v6
-// split); the chart is sampled by the browser itself from the live
-// stats stream (one value per probe/stack per 30 s refresh), so
-// closing the browser restarts its history. The overview tab carries
+// split); the chart reads server-side probe history (minute/hour
+// buckets persisted by the server, so expanding a node draws its
+// curve at once), with a live tail appended between history fetches.
+// The overview tab carries
 // only what React's own expanded row does not already show (plan,
 // system, CPU model, traffic, boot time, online duration, last
 // activity, version, public note); clicking again collapses it. The
@@ -33,6 +34,8 @@
 // never fabricated (in particular no expiry date is derived).
 (function () {
   'use strict';
+
+  // ---- Shared state ----
   var GiB = 1024 * 1024 * 1024;
   var planByName = {};
   var expanded = {}; // node name -> true while its detail block is open
@@ -40,6 +43,7 @@
   var activeTag = null; // null = all rows; '' = default group; else a Tag
   var haveStats = false; // true once stats.json has loaded at least once
 
+  // ---- Tag pills ----
   function tagDisplay(tag) { return tag ? tag : '默认'; }
 
   function pillsData() {
@@ -49,6 +53,17 @@
       counts[t] = (counts[t] || 0) + 1;
     });
     return counts;
+  }
+
+  // Shared name-cell lookup (was two identical loops: inject's row
+  // pass and onDocClick). Same iteration order, same comparison.
+  function findByDisplay(text) {
+    var names = Object.keys(planByName);
+    for (var i = 0; i < names.length; i++) {
+      var s = planByName[names[i]];
+      if (text === s.display) return s;
+    }
+    return null;
   }
 
   // Batch 3: the pill bar lives in the page header, next to the
@@ -83,6 +98,19 @@
     bar.style.flex = '';
   }
 
+  // One helper for the three one-shot style injections below
+  // (mobile header fix, detail dark, chart dark): same guard
+  // (already present -> no-op), same element, same append. The
+  // CSS strings and element ids are unchanged; only the
+  // guard/create/append boilerplate lives here once.
+  function ensureStyle(id, css) {
+    if (document.getElementById(id)) return;
+    var st = document.createElement('style');
+    st.id = id;
+    st.textContent = css;
+    document.head.appendChild(st);
+  }
+
   // Mobile header fix (2026-10-27): the React header wrapper #header is
   // a fixed 80px tall on narrow screens (bundle: h-[80px] ... md:h-[100px]),
   // while the pill bar injected above makes the header row taller once it
@@ -95,17 +123,13 @@
   // to rotation/resize, and it never applies at >=768px, so the desktop
   // one-row header is byte-for-byte untouched.
   function ensureHeaderFixStyle() {
-    if (document.getElementById('ssr-mobile-header-fix')) return;
-    var st = document.createElement('style');
-    st.id = 'ssr-mobile-header-fix';
-    st.textContent = '@media (max-width: 767px){'
+    ensureStyle('ssr-mobile-header-fix', '@media (max-width: 767px){'
       + '#header{height:auto !important;padding-bottom:28px !important;}'
       + '#header > .container{flex-wrap:wrap !important;}'
       + '#header h1.logo{order:1;}'
       + '#header > .container > div.pr-8{order:2;}'
       + '#ssr-tag-pills{order:3;flex:1 1 100% !important;}'
-      + '}';
-    document.head.appendChild(st);
+      + '}');
   }
 
   // Dark-mode detail text (2026-10-27): the overlay detail block's
@@ -125,15 +149,11 @@
   // the chart card's dark colours live separately in
   // ensureChartDarkStyle (v21: v16 deliberately left the chart light).
   function ensureDetailDarkStyle() {
-    if (document.getElementById('ssr-detail-dark')) return;
-    var st = document.createElement('style');
-    st.id = 'ssr-detail-dark';
-    st.textContent =
+    ensureStyle('ssr-detail-dark',
       '.dark [data-ssr-detail]{color:#f9fafb !important;}'
       + '.dark [data-ssr-detail] div:not([style*="position:fixed"]){color:#d1d5db !important;}'
       + '.dark [data-ssr-detail] > div:first-child{color:#f9fafb !important;}'
-      + '.dark [data-ssr-detail] button{color:#e5e7eb !important;}';
-    document.head.appendChild(st);
+      + '.dark [data-ssr-detail] button{color:#e5e7eb !important;}');
   }
 
   // Dark-mode chart card (2026-10-27, v21): the latency chart svg
@@ -147,14 +167,10 @@
   // hence !important on the card rule; grid/tick rules override
   // presentation attributes, which lose to any stylesheet rule.
   function ensureChartDarkStyle() {
-    if (document.getElementById('ssr-chart-dark')) return;
-    var st = document.createElement('style');
-    st.id = 'ssr-chart-dark';
-    st.textContent =
+    ensureStyle('ssr-chart-dark',
       '.dark svg[data-ssr-chart]{background:#1e293b !important;}'
       + '.dark svg[data-ssr-chart] line[data-ssr-grid]{stroke:#374151 !important;}'
-      + '.dark svg[data-ssr-chart] text{fill:#d1d5db !important;}';
-    document.head.appendChild(st);
+      + '.dark svg[data-ssr-chart] text{fill:#d1d5db !important;}');
   }
 
   function renderPills() {
@@ -207,20 +223,10 @@
     placePills(bar);
   }
 
+  // ---- Formatting helpers ----
   function fmtGiB(bytes) {
     var v = bytes / GiB;
     return (Math.round(v * 100) / 100) + 'GiB';
-  }
-
-  // Units in stats.json (see client sys_info::sample): memory totals are
-  // KiB (bytes / 1024), disk totals are MB (calc_hdd_stats). The detail
-  // view divides by the same units, so these helpers must too — dividing
-  // by 2^30 as if they were bytes yields 0GiB for every real machine.
-  function fmtGiBFromKiB(kib) {
-    return (Math.round(kib / 1024 / 1024 * 100) / 100) + 'GiB';
-  }
-  function fmtGiBFromMB(mb) {
-    return (Math.round(mb / 1024 * 100) / 100) + 'GiB';
   }
 
   function fmtFee(fee, cur) {
@@ -239,14 +245,13 @@
     return String(Math.round(v * 1000) / 1000);
   }
 
+  // Shared zero-pad (was three identical locals: bootLine's p,
+  // latChart's fmtT p, latChart's pad2). Pure, same output.
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
   function fmtDate(ts) {
     if (!ts) return '—';
     try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return '—'; }
-  }
-
-  function pct(used, total) {
-    if (!total) return '';
-    return ' (' + (Math.round(used / total * 1000) / 10) + '%)';
   }
 
   // Unlimited traffic is spelled 0 only (see traffic::is_unlimited).
@@ -255,6 +260,7 @@
     return !bytes;
   }
 
+  // ---- Plan & detail lines ----
   function planLine(s) {
     var parts = [];
     if (s.plan_start_date) parts.push('开始 ' + s.plan_start_date);
@@ -299,9 +305,8 @@
     if (!isFinite(sec) || sec <= 0) return '';
     var d = new Date(Date.now() - sec * 1000);
     if (isNaN(d.getTime())) return '';
-    var p = function (n) { return (n < 10 ? '0' : '') + n; };
-    return '启动时间：' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
-      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    return '启动时间：' + d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+      + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
 
   function detailLines(s) {
@@ -545,6 +550,15 @@
     return line;
   }
 
+  // Small grey note under the chart (error/loading/empty states
+  // share this exact style; was three identical literals).
+  function latNote(text) {
+    var el = document.createElement('div');
+    el.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
+    el.textContent = text;
+    return el;
+  }
+
   function latChart(name, st, probes) {
     var wrap = document.createElement('div');
     // Server history is fetched on demand: expanding a node (or
@@ -554,10 +568,7 @@
     var histState = latSrvState[histKey];
     if (histState !== 'ready') {
       if (histState === 'error') {
-        var err = document.createElement('div');
-        err.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
-        err.textContent = '曲线加载失败：服务端历史接口未返回。';
-        wrap.appendChild(err);
+        wrap.appendChild(latNote('曲线加载失败：服务端历史接口未返回。'));
         var retry = document.createElement('button');
         retry.textContent = '重试';
         retry.style.cssText = 'border:1px solid #d1d5db;background:transparent;color:#374151;border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;margin-top:4px';
@@ -566,21 +577,15 @@
         return wrap;
       }
       if (histState !== 'loading') fetchLatHistory(name, st.range);
-      var loading = document.createElement('div');
-      loading.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
-      loading.textContent = '正在加载曲线…';
-      wrap.appendChild(loading);
+      wrap.appendChild(latNote('正在加载曲线…'));
       return wrap;
     }
     var series = latSeries(name, st.range, probes);
     var hasData = series.some(function (s) { return s.points.some(function (p) { return p[1] !== null; }); });
     if (!hasData) {
-      var empty = document.createElement('div');
-      empty.style.cssText = 'font-size:11px;color:#6b7280;margin-top:4px';
-      empty.textContent = (series.length === 0)
+      wrap.appendChild(latNote((series.length === 0)
         ? '未设置探针：在后台探针页填入地址并保存后，服务端开始记录，展开节点即可看到曲线。'
-        : '已有探针，暂无有效记录：服务端从部署起开始攒曲线，稍后回来就有曲线。';
-      wrap.appendChild(empty);
+        : '已有探针，暂无有效记录：服务端从部署起开始攒曲线，稍后回来就有曲线。'));
       return wrap;
     }
     var radius = st.range <= 6 ? 2 : 1;
@@ -605,9 +610,9 @@
       while (true) {
         var ms = [1, 2, 5];
         for (var mi = 0; mi < ms.length; mi++) {
-          var st = ms[mi] * pow;
-          var top = Math.ceil(ymax / st) * st;
-          if (top / st <= 6) { yStep = st; yTop = top; return; }
+          var step = ms[mi] * pow;
+          var top = Math.ceil(ymax / step) * step;
+          if (top / step <= 6) { yStep = step; yTop = top; return; }
         }
         pow *= 10;
       }
@@ -639,10 +644,9 @@
     }
     var fmtT = function (ts) {
       var d = new Date(ts * 1000);
-      var p = function (n) { return (n < 10 ? '0' : '') + n; };
       return st.range >= 168
-        ? (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()))
-        : (p(d.getHours()) + ':' + p(d.getMinutes()));
+        ? (pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()))
+        : (pad2(d.getHours()) + ':' + pad2(d.getMinutes()));
     };
     // X ticks: whole-hour anchored (never data-boundary anchored —
     // that is why 24h used to read 23:24/03:52/08:20). Interval by
@@ -652,7 +656,6 @@
     // interval doubles until labels cannot overlap (doubling keeps
     // whole-hour anchors); a short window with fewer than two
     // anchors refines down to 10min instead of going bare.
-    var pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
     var hhmm = function (ts) { var d = new Date(ts * 1000); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
     var xTickList = function () {
       var step = st.range <= 1 ? 300 : st.range <= 6 ? 1800 : st.range <= 24 ? 7200 : 43200;
@@ -863,9 +866,9 @@
         }
         drawn.forEach(function (s, idx) {
           var v = vals[idx];
-          var vline = document.createElement('div');
-          vline.textContent = s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
-          tip.appendChild(vline);
+          var row = document.createElement('div');
+          row.textContent = s.key + ' ' + (v === null || v === undefined ? '—' : v + 'ms');
+          tip.appendChild(row);
         });
       }
       tip.style.display = 'block';
@@ -983,6 +986,7 @@
     return bar;
   }
 
+  // ---- Detail block & table ----
   function summaryLine(s) {
     var parts = [s.display];
     parts.push((s.online4 || s.online6) ? '在线' : '离线');
@@ -1080,6 +1084,7 @@
     });
   }
 
+  // ---- Inject / events / bootstrap ----
   function inject() {
     var names = Object.keys(planByName);
     if (!names.length) return;
@@ -1099,11 +1104,7 @@
       // Strip our own indicator before matching: after the first inject
       // the div text starts with ▸/▾, which is not part of the name.
       var text = (div.textContent || '').trim().replace(/^[▸▾]/, '').trim();
-      var srv = null;
-      for (var i = 0; i < names.length; i++) {
-        var s = planByName[names[i]];
-        if (text === s.display) { srv = s; break; }
-      }
+      var srv = findByDisplay(text);
       if (!srv) return;
       var td = div.closest('td');
       if (!td || handled.has(td)) return;
@@ -1298,12 +1299,7 @@
     var t = e.target && e.target.closest ? e.target.closest('div.truncate') : null;
     if (!t || !t.closest('td')) return;
     var text = (t.textContent || '').trim().replace(/^[▸▾]/, '').trim();
-    var srv = null;
-    var names = Object.keys(planByName);
-    for (var i = 0; i < names.length; i++) {
-      var s = planByName[names[i]];
-      if (text === s.display) { srv = s; break; }
-    }
+    var srv = findByDisplay(text);
     if (!srv) return;
     // Deliberately no stopPropagation/preventDefault and no map
     // toggle: React owns the toggle (whole-row onClick) and the map
@@ -1341,21 +1337,10 @@
             cpu: (typeof s.cpu === 'number') ? s.cpu : null,
             memory_total: s.memory_total || 0,
             memory_used: s.memory_used || 0,
-            swap_total: s.swap_total || 0,
-            swap_used: s.swap_used || 0,
-            hdd_total: s.hdd_total || 0,
-            hdd_used: s.hdd_used || 0,
-            month_rx: s.month_rx || 0,
-            month_tx: s.month_tx || 0,
-            total_rx: s.total_rx || 0,
-            total_tx: s.total_tx || 0,
             month_used: s.month_used || 0,
             load_1: s.load_1 || 0,
             load_5: s.load_5 || 0,
             load_15: s.load_15 || 0,
-            process_count: s.process_count || 0,
-            tcp_count: s.tcp_count || 0,
-            udp_count: s.udp_count || 0,
             // uptime_sec = raw seconds (boot time); uptime_display =
             // the formatted string ("N 天" / "HH:MM:SS", the stats
             // "uptime" key). Never feed the string into bootLine.
