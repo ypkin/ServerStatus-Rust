@@ -613,46 +613,220 @@ OPTIONS:
 - 启动日志不打印后台账号与密码；鉴权响应字段名为 `access_token`。
 
 
-## Docker Compose 部署
+## 从零部署（全新部署）
 
-创建 `docker-compose.yml` 文件：
+本节是从一台空机器开始、把本分支完整跑起来的步骤，分服务端、反代、后台初始化、客户端四步。服务端与客户端均从本分支源码构建，**不要混用上游 Release 二进制**：上游客户端没有本分支的 ICMP 探针与服务端下发探针，上游服务端没有后台、流量累计与探针历史。前端定制随服务端二进制一起发布（overlay 经 RustEmbed 编进二进制），无需单独部署前端。
+
+本分支暂不提供可用的预编译镜像，一律本地构建。完整 release 构建建议 2GB 以上内存；小内存机器先加 swap，或在别的机器上编好再把二进制拷过来。
+
+### 1. 服务端：Docker 方式（推荐）
+
+```bash
+git clone <本仓库地址>
+cd ServerStatus-Rust
+mkdir -p data
+```
+
+按第 3 节写好 `data/config.toml`（`data` 里只手写这一个文件；`stats.json`、`traffic.json`、`admin.json`、`ping_history.json` 由服务端自动生成，缺失按空加载，**不要手建空 JSON 文件**，空文件不是合法 JSON）。
+
+在仓库根目录新建 `docker-compose.yml`：
 
 ```yaml
 services:
-  serverstatus:
-    image: ghcr.io/ypkin/serverstatus-rust:latest
-    container_name: serverstatus-rust
+  ssr-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.ghcr
+    image: ssr-server:latest
+    container_name: ssr-server
     restart: unless-stopped
+    working_dir: /data
+    command: ["-c", "/data/config.toml"]
     ports:
-      - "8080:8080"     # Web 管理面板与前台访问端口
-      - "35601:35601"   # 客户端上报端口
+      - "8080:8080"   # 面板与 /report
+      - "9394:9394"   # gRPC；前面有 nginx 且客户端都走 https /report 时可不映射公网
     volumes:
-      - ./config.toml:/app/config.toml:ro
+      - ./data:/data
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=Asia/Shanghai   # 改成你自己的时区
 ```
 
-启动命令：
-
 ```bash
-docker compose pull
-docker compose up -d
+docker compose up -d --build
 ```
 
----
+首次构建约 10–20 分钟（在镜像里编整个 workspace）。启动后打开 `http://<服务端IP>:8080`，能看到面板即服务端已起。
 
-### 第三步：切换 Remote、提交并推送
-
-由于仓库需要推送到你自己的 GitHub 账号下：
-
-1. **在 GitHub 网页新建你自己的仓库**（例如 `ServerStatus-Rust`）。
-2. **将本地仓库的远程地址改为你自己的仓库**：
+### 2. 服务端：裸二进制方式（备选）
 
 ```bash
-# 检查当前远程地址
-git remote -v
+git clone <本仓库地址>
+cd ServerStatus-Rust
+touch server/build.rs   # 否则 banner 里的提交号可能缓存成旧值
+cargo build --release -p stat_server
+```
 
-# 替换 origin 为你自己的仓库地址（SSH 或 HTTPS 均可）
-git remote set-url origin git@github.com:<你的用户名>/ServerStatus-Rust.git
-# 或者如果是 HTTPS:
-# git remote set-url origin https://github.com/<你的用户名>/ServerStatus-Rust.git
+产物在 `target/release/stat_server`。把它和仓库里的 `systemd/stat_server.service` 配合使用（只改下面两行）：
+
+```ini
+[Service]
+WorkingDirectory=/opt/ServerStatus
+ExecStart=/opt/ServerStatus/stat_server -c /opt/ServerStatus/config.toml
+Restart=on-failure
+```
+
+即：二进制放 `/opt/ServerStatus/stat_server`，`config.toml` 与数据文件放 `/opt/ServerStatus/`（WorkingDirectory 指到哪里，数据文件就写到哪里），然后：
+
+```bash
+cp target/release/stat_server /opt/ServerStatus/
+cp systemd/stat_server.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now stat_server
+```
+
+### 3. 最小 config.toml
+
+仓库根目录的 `config.toml` 就是带注释的完整示例；下面是能跑起来的最小版。`admin_user` / `admin_pass` 必须填，留空会随机生成且启动日志不打印，等于把自己锁在 `/admin` 外面：
+
+```toml
+grpc_addr = "0.0.0.0:9394"
+http_addr = "0.0.0.0:8080"
+offline_threshold = 30
+
+admin_user = "<管理员账号>"
+admin_pass = "<强密码>"
+
+# 单机模式：name 唯一，password 是客户端 -p 要用的密码
+hosts = [
+  {name = "node1", password = "<节点密码>", alias = "节点 1", location = "cn", type = "kvm"},
+]
+
+# 或者分组模式（二选一）：客户端用 -g <gid> -p <分组密码> 接入即自动建节点
+# hosts_group = [
+#   {gid = "g1", password = "<分组密码>", location = "cn", type = "kvm"},
+# ]
+
+# 套餐字段（节点与分组都可加；后台也能改，改动即时生效不用重启）：
+# traffic_limit 按字节，0 = 不限量（不要填 9999，旧约定已退役）；
+# traffic_mode = "sum" | "up" | "down" | "max"（up 只计出方向、down 只计入方向、max 取大、空归 sum）；
+# monthstart = 每月重置日 1–31（留空为自然月）；
+# plan_start_date = "2026-01-15"；annual_fee = 年费；bandwidth_mbps = 带宽
+# 例：{name = "node1", password = "…", traffic_limit = 1099511627776, traffic_mode = "sum", monthstart = 1, plan_start_date = "2026-01-15", annual_fee = 15.99, bandwidth_mbps = 1000}
+
+[ping]
+enabled = true
+cu_name = "联通"
+ct_name = "电信"
+cm_name = "移动"
+# 探针地址：IP 或域名加端口，v6 加方括号；端口会被自动剥离（ICMP 不依赖端口），旧地址无需重填
+# 空 = 该路未配置，跳过不探（不是故障）；电信没有探针地址就留空
+cu_addr = "<联通探针地址>"
+ct_addr = ""
+cm_addr = "<移动探针地址>"
+cu_addr_v6 = ""
+ct_addr_v6 = ""
+cm_addr_v6 = ""
+
+[pushplus]
+enabled = false
+# token 在后台填自己的，不要用别人的；channel 一般填 wechat
+token = ""
+title = "ServerStatus"
+channel = "wechat"
+```
+
+另注意两点：`server_url` 不用填，服务端按请求 Host 自动生成——所以反代必须透传 Host，否则面板的 `/i` 一键命令会生成内网地址；`admin.json` 是后台的持久化文件，**外部直接改它必须先停服务**，改完再启动，否则下次后台保存会把内存旧值整文件写回。
+
+### 4. 反代 + TLS（nginx 示例）
+
+```nginx
+server {
+    listen 80;
+    server_name <你的域名>;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name <你的域名>;
+    ssl_certificate /etc/nginx/certs/<你的域名>_cert.pem;
+    ssl_certificate_key /etc/nginx/certs/<你的域名>_key.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $http_host;   # 关键：必须透传 Host，否则 /i 命令生成内网地址
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+证书用 certbot 申请（HTTP-01 需 80 端口可达，DNS-01 适合已有域名解析），路径按自己环境改。公网只需暴露 80/443；8080/9394 保持本机监听即可。
+
+### 5. 后台初始化（/admin）
+
+打开 `https://<你的域名>/admin`，用 `config.toml` 的 admin 账号登录：
+
+1. 建分组 / 节点（或等客户端自动注册）。
+2. 填三网探针地址（联通 / 电信 / 移动 × v4 / v6，见第 3 节格式）。
+3. PushPlus：填**自己的** token，开关与模板按需改（token 只存服务端，接口不回显）。
+4. 套餐：限额、模式、重置日、开始日期、年费、带宽按需填；**结束日期只填已知值，绝不推导，空永远是空**。
+5. 后台改动即时生效，不用重启服务端。
+
+### 6. 客户端（musl 手动安装；不要用面板的 /i 一键脚本）
+
+`/i` 下发的一键脚本从上游 Release 下载客户端（仅 systemd 服务），没有本分支的 ICMP 探针与服务端下发探针；要完整功能必须手动装 musl 版。
+
+构建（构建机上做，不必是节点本身）：
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+# Debian/Ubuntu：apt install -y musl-tools   # 提供 musl-gcc
+cargo build --release --target x86_64-unknown-linux-musl -p stat_client
+```
+
+产物在 `target/x86_64-unknown-linux-musl/release/stat_client`。拷到节点：
+
+```bash
+mkdir -p /opt/ServerStatus
+cp target/x86_64-unknown-linux-musl/release/stat_client /opt/ServerStatus/stat_client
+```
+
+systemd（参照仓库 `systemd/stat_client.service`，只改 ExecStart 一行）：
+
+```ini
+[Service]
+User=root
+WorkingDirectory=/opt/ServerStatus
+ExecStart=/opt/ServerStatus/stat_client -a "https://<你的域名>/report" -u <节点名> -p <节点密码>
+Restart=on-failure
+```
+
+分组接入把 `-u <节点名>` 换成 `-g <分组名>`。无域名时 `-a` 可写 `http://<服务端IP>:8080/report`。然后：
+
+```bash
+cp systemd/stat_client.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now stat_client
+```
+
+Alpine/OpenRC 机器：把上面同一行 ExecStart 写进 `/etc/init.d/stat_client`（openrc-run 格式，`command=/opt/ServerStatus/stat_client`，`command_args` 照抄引号里的参数），`rc-update add stat_client default && rc-service stat_client start`。
+
+客户端须以 root 运行（ICMP 需 DGRAM/RAW 权限；非 root 需配 `ping_group_range` 或 `CAP_NET_RAW`）。节点名 / 分组名与密码须与 `config.toml` 或后台一致，否则注册不上。
+
+### 7. 验收清单
+
+- 面板 `https://<你的域名>` 能打开，节点在线（30 秒无上报判下线）。
+- `/admin` 能登录，后台改动即时生效。
+- 探针格有数值；空配置的列显示 — 属正常未配置，不是故障。
+- 客户端 `systemctl status stat_client` 无持续报错，月流量随上报增长。
+- 浏览器看到旧版先硬刷新：overlay 每页只加载一次，旧标签页要重载才拿新版。
+
+### 8. 常见坑
+
+- 限额填 `0` = 不限量，不要填 `9999`。
+- 结束日期不推导；`admin.json` 外改先停服务。
+- 数据目录不要手建空 JSON 文件。
+- 小内存机器构建 OOM：加 swap 或异地构建再拷二进制。
+- 旧 overlay / bundle 文件不要删：旧缓存的 HTML 还引用它们，删了会 404。
+- 探针历史只能从部署起攒，过去数据不编造；延迟图档位 1h / 6h / 24h / 7d。
