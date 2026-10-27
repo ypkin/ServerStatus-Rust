@@ -59,7 +59,7 @@ impl StatsMgr {
                             srv.last_network_in = last_network_in;
                             srv.last_network_out = last_network_out;
 
-                            trace!("{} => last in/out ({}/{}))", &name, last_network_in, last_network_out);
+                            trace!("{} => last in/out ({}/{}))", name, last_network_in, last_network_out);
                         }
                     } else {
                         error!("invalid json => {v:?}");
@@ -416,7 +416,7 @@ impl StatsMgr {
                 }
 
                 if let Ok(mut host_stat_map) = STAT_MAP.lock() {
-                    for (_, stat) in host_stat_map.iter_mut() {
+                    for stat in host_stat_map.values_mut() {
                         if stat.disabled {
                             resp.servers.push(Arc::clone(stat));
                             continue;

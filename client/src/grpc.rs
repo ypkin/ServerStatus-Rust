@@ -28,8 +28,7 @@ pub async fn report(args: &Args, stat_base: &mut StatRequest) -> anyhow::Result<
     let token = MetadataValue::try_from(format!("{}@_@{}", auth_user, args.pass))?;
 
     let addr = args.addr.replace("grpcs://", "https://");
-    let channel: Channel;
-    if args.mtls {
+    let channel: Channel = if args.mtls {
         // === mTLS 模式 ===
         let u = Url::parse(&addr)?;
         let domain_name = u.host_str().ok_or_else(|| anyhow::anyhow!("invalid URL: missing host"))?;
@@ -46,16 +45,16 @@ pub async fn report(args: &Args, stat_base: &mut StatRequest) -> anyhow::Result<
             .ca_certificate(ca)
             .identity(client_identity);
             
-        channel = Channel::from_shared(addr)?
+        Channel::from_shared(addr)?
             .tls_config(tls_config)?
-            .connect().await?;
+            .connect().await?
     } else if addr.starts_with("https://") {
         // TLS
         let tls_config = ClientTlsConfig::new();
-        channel = Channel::from_shared(addr)?.tls_config(tls_config)?.connect().await?;
+        Channel::from_shared(addr)?.tls_config(tls_config)?.connect().await?
     } else {
-        channel = Channel::from_shared(addr)?.connect().await?;
-    }
+        Channel::from_shared(addr)?.connect().await?
+    };
 
     let timeout_channel = Timeout::new(channel, Duration::from_millis(3000));
     let grpc_client = ServerStatusClient::with_interceptor(timeout_channel, move |mut req: Request<()>| {
