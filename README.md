@@ -638,3 +638,21 @@ services:
 docker compose pull
 docker compose up -d
 ```
+
+---
+
+### 第三步：切换 Remote、提交并推送
+
+由于仓库需要推送到你自己的 GitHub 账号下：
+
+1. **在 GitHub 网页新建你自己的仓库**（例如 `ServerStatus-Rust`）。
+2. **将本地仓库的远程地址改为你自己的仓库**：
+
+```bash
+# 检查当前远程地址
+git remote -v
+
+# 替换 origin 为你自己的仓库地址（SSH 或 HTTPS 均可）
+git remote set-url origin git@github.com:<你的用户名>/ServerStatus-Rust.git
+# 或者如果是 HTTPS:
+# git remote set-url origin https://github.com/<你的用户名>/ServerStatus-Rust.git
