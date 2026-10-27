@@ -153,7 +153,8 @@ pub fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
 ///   only if that is missing does a private NIC address get used.
 /// - v6 = first global unicast NIC address (sorted, deterministic);
 ///   a geoip v6 egress address is only a fallback when the NIC has none.
-/// Missing values stay empty; the admin falls back to the geoip query
+///
+ /// Missing values stay empty; the admin falls back to the geoip query
 /// address, so old behaviour is preserved for old clients.
 /// sysinfo-gated: the caller only calls this with the sysinfo feature
 /// on; non-sysinfo builds keep empty addresses.
@@ -641,8 +642,13 @@ fn start_ping_collect_t(data: &Arc<Mutex<PingData>>, is_v6: bool) {
 ///   config (enabled + 6 addresses, possibly all empty). The server is
 ///   authoritative: an empty address means "skip that probe/stack" (the
 ///   cell idles on an empty URI), never a fallback to CLI defaults.
-/// A disabled server setting stops probing but keeps the addresses, so a
+///
+ /// A disabled server setting stops probing but keeps the addresses, so a
 /// later re-enable resumes without another client change.
+#[allow(clippy::too_many_arguments)]
+// apply_ping_config takes two flags plus six probe addresses (three
+// carriers x two stacks); grouping them would churn the caller for no
+// behavior gain.
 pub fn apply_ping_config(
     managed: bool,
     enabled: bool,

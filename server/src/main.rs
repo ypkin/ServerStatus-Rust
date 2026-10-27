@@ -131,8 +131,8 @@ async fn main() -> Result<(), anyhow::Error> {
     // config test
     if args.config_test {
         config::test_from_file(&args.config).unwrap();
-        eprintln!("✨ the conf file {} syntax is ok", &args.config);
-        eprintln!("✨ the conf file {} test is successful", &args.config);
+        eprintln!("✨ the conf file {} syntax is ok", args.config);
+        eprintln!("✨ the conf file {} test is successful", args.config);
         process::exit(0);
     }
 
@@ -143,7 +143,7 @@ async fn main() -> Result<(), anyhow::Error> {
         eprintln!("✨ run in cloud mode, load config from env");
         config::from_env()
     } else {
-        eprintln!("✨ run in normal mode, load conf from local file `{}", &args.config);
+        eprintln!("✨ run in normal mode, load conf from local file `{}", args.config);
         config::from_file(&args.config)
     } {
         debug!("{}", serde_json::to_string_pretty(&cfg).unwrap());

@@ -18,6 +18,7 @@
 //!    client has: every fleet service file runs it as root). Raw
 //!    sockets are left unbound: the kernel does not rewrite the ident
 //!    on raw sockets.
+//!
 //! If both fail, the caller logs once per target and counts the sample
 //! as lost. There is intentionally NO fallback to TCP connect: a
 //! port-dependent result is exactly the misleading data this module
@@ -59,11 +60,11 @@ impl From<io::Error> for PingError {
 
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for c in chunks {
+        sum += u16::from_be_bytes(*c) as u32;
     }
-    if let Some(&last) = chunks.remainder().first() {
+    if let Some(&last) = remainder.first() {
         sum += (last as u32) << 8;
     }
     while sum >> 16 != 0 {
@@ -187,7 +188,7 @@ impl IcmpPinger {
                 })
             }
             Err(_) => Err(dgram_err.unwrap_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "no ICMP socket available")
+                io::Error::other("no ICMP socket available")
             })),
         }
     }

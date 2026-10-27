@@ -35,7 +35,7 @@ impl TGBot {
     pub fn new(cfg: &'static Config) -> Self {
         let o = Self {
             config: cfg,
-            tg_url: format!("https://api.telegram.org/bot{}/sendMessage", &cfg.bot_token),
+            tg_url: format!("https://api.telegram.org/bot{}/sendMessage", cfg.bot_token),
             http_client: reqwest::Client::new(),
         };
 

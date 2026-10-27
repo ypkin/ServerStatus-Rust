@@ -136,7 +136,7 @@ fn merge_point(tier: &mut VecDeque<Bucket>, bucket: i64, ms: Option<f64>, loss: 
 }
 
 fn prune(tier: &mut VecDeque<Bucket>, cutoff: i64, cap: usize) {
-    while tier.front().map_or(false, |b| b.t < cutoff) {
+    while tier.front().is_some_and(|b| b.t < cutoff) {
         tier.pop_front();
     }
     while tier.len() > cap {

@@ -145,6 +145,10 @@ impl TrafficState {
     /// Book one reading of a host's raw counters. Returns the delta actually
     /// booked. `booted` is the host's boot time as a unix timestamp (now
     /// minus reported uptime), `last_seen` is the previous report's timestamp.
+    #[allow(clippy::too_many_arguments)]
+    // accumulate takes one full observation (boot id, counters, reset day,
+    // timestamp, boot time, last-seen); grouping it into a struct would
+    // churn every caller for no behavior gain.
     pub fn accumulate(
         &mut self,
         boot_id: &str,

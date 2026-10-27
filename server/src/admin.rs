@@ -616,7 +616,7 @@ pub async fn post_host(
         return err(StatusCode::BAD_REQUEST, "unknown gid: create the group first");
     }
     let monthstart = body.monthstart.unwrap_or(1);
-    if monthstart < 1 || monthstart > 31 {
+    if !(1..=31).contains(&monthstart) {
         return err(StatusCode::BAD_REQUEST, "monthstart must be 1..=31");
     }
     if !valid_plan_date(&body.plan_start_date) {
@@ -735,7 +735,7 @@ pub async fn put_host(
         }
     }
     if let Some(m) = body.monthstart {
-        if m < 1 || m > 31 {
+        if !(1..=31).contains(&m) {
             return err(StatusCode::BAD_REQUEST, "monthstart must be 1..=31");
         }
     }
