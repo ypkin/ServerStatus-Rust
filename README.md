@@ -611,3 +611,23 @@ OPTIONS:
 - 服务端为 glibc 动态版，Docker 底包须用 `ubuntu:24.04`；构建前先 `touch server/build.rs`，否则 banner 里的提交号可能缓存成旧值。
 - 客户端分发**只用 musl 静态版**（`x86_64-unknown-linux-musl`），动态版在 glibc 较低的机器上起不来。
 - 启动日志不打印后台账号与密码；鉴权响应字段名为 `access_token`。
+
+
+## Docker Compose 部署
+
+创建 `docker-compose.yml` 文件：
+
+```yaml
+services:
+  serverstatus:
+    image: ghcr.io/ypkin/serverstatus-rust:latest
+    container_name: serverstatus-rust
+    restart: unless-stopped
+    ports:
+      - "8080:8080"     # Web 管理面板与前台访问端口
+      - "35601:35601"   # 客户端上报端口
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      - TZ=Asia/Shanghai
+
