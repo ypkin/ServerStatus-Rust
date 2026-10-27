@@ -1,17 +1,3 @@
-buildx failed with: ERROR: failed to build: failed to solve: dockerfile parse error on line 1: unknown instruction: buildx
-```
-
-**问题原因：**
-在编辑 `Dockerfile.ghcr` 文件时，第一行不小心把上一轮报错日志里的单词（或者终端复制的内容）`buildx` 粘贴到了文件第一行[cite: 15]。`Dockerfile` 的第一条有效指令必须是 `FROM`，导致解析器在第一行就报错退出[cite: 15]。
-
----
-
-### 解决步骤
-
-1. 点击仓库顶部的 **`Code`** 标签页[cite: 15]。
-2. 打开 **`Dockerfile.ghcr`** 文件，点击右上角的 **铅笔图标（Edit this file）**。
-3. **清空里面的全部内容**，然后把下面这份干净的代码**完整粘贴**进去（确保第一行就是 `FROM` 开头）：
-
 ```dockerfile
 # =========================
 # Stage 1: Build stage
