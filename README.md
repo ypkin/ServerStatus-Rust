@@ -630,4 +630,11 @@ services:
       - ./config.toml:/app/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
+```
 
+启动命令：
+
+```bash
+docker compose pull
+docker compose up -d
+```
