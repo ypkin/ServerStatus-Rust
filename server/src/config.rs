@@ -499,10 +499,6 @@ impl Config {
     pub fn to_json_value(&self) -> Result<Value> {
         serde_json::to_value(self).map_err(anyhow::Error::new)
     }
-
-    // pub fn to_string(&self) -> Result<String> {
-    //     serde_json::to_string(&self).map_err(anyhow::Error::new)
-    // }
 }
 
 pub fn from_str(content: &str) -> Option<Config> {

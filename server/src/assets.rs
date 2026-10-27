@@ -13,7 +13,6 @@ pub async fn index_handler() -> impl IntoResponse {
     static_handler(&"/index.html".parse::<Uri>().unwrap())
 }
 
-#[allow(unused)]
 #[allow(clippy::unused_async)]
 pub async fn admin_index_handler() -> impl IntoResponse {
     static_handler(&"/admin.html".parse::<Uri>().unwrap())

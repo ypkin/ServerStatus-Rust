@@ -56,12 +56,6 @@ pub async fn get_ping_history(Query(q): Query<HashMap<String, String>>) -> impl 
     )
 }
 
-#[allow(unused)]
-pub fn get_site_config_json() -> impl IntoResponse {
-    // TODO
-    ([(header::CONTENT_TYPE, "application/json")], "{}")
-}
-
 pub async fn admin_api(_claims: jwt::Claims, Path(path): Path<String>) -> Json<Value> {
     match path.as_str() {
         "stats.json" => {

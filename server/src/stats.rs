@@ -592,8 +592,6 @@ impl StatsMgr {
                     srv.insert("country_code".into(), serde_json::json!(cc));
                 }
             }
-        } else {
-            // todo!()
         }
 
         Ok(resp_json)
