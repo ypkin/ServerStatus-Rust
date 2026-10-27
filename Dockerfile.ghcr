@@ -1,7 +1,21 @@
+buildx failed with: ERROR: failed to build: failed to solve: process "/bin/sh -c apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata libssl1.1 && rm -rf /var/lib/apt/lists/*" did not comp...
+```[cite: 14]
+
+这是因为在第二阶段运行时镜像中，`debian:bullseye-slim`（或者更高版本）的软件源中已经将旧版的 `libssl1.1` 废弃或替换为 `libssl3`，导致 `apt-get install` 找不到该包直接退出报错[cite: 14]。同时，采用更高版本的 Debian Bookworm 基础镜像兼容性更好。
+
+---
+
+### 解决方法
+
+只需要修改仓库中的 **`Dockerfile.ghcr`**，直接把运行阶段的 `libssl1.1` 改为通用的 `libssl-dev` / `libssl3`（或者统一基础镜像版本）：
+
+#### 完整的 `Dockerfile.ghcr` 内容
+
+```dockerfile
 # =========================
 # Stage 1: Build stage
 # =========================
-FROM rust:1.80-slim-bullseye AS builder
+FROM rust:1.80-bullseye AS builder
 
 WORKDIR /usr/src/serverstatus
 
@@ -22,14 +36,14 @@ FROM debian:bullseye-slim
 
 WORKDIR /app
 
-# 安装基础运行依赖
+# 安装基础运行依赖（使用 openssl / ca-certificates，兼容性更稳）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    libssl1.1 \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制编译后的二进制文件
+# 复制编译产物（根据实际编译出来的二进制名复制）
 COPY --from=builder /usr/src/serverstatus/target/release/stat_server /app/stat_server
 
 EXPOSE 8080 35601
