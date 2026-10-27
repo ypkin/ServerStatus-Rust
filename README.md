@@ -617,7 +617,7 @@ OPTIONS:
 
 本节是从一台空机器开始、把本分支完整跑起来的步骤，分服务端、反代、后台初始化、客户端四步。服务端与客户端均从本分支源码构建，**不要混用上游 Release 二进制**：上游客户端没有本分支的 ICMP 探针与服务端下发探针，上游服务端没有后台、流量累计与探针历史。前端定制随服务端二进制一起发布（overlay 经 RustEmbed 编进二进制），无需单独部署前端。
 
-本分支暂不提供可用的预编译镜像，一律本地构建。完整 release 构建建议 2GB 以上内存；小内存机器先加 swap，或在别的机器上编好再把二进制拷过来。
+预编译镜像已发布（amd64 + arm64 双架构，匿名拉取无需登录），Docker 部署推荐直接 pull，不用本地构建。
 
 ### 1. 服务端：Docker 方式（推荐）
 
@@ -634,10 +634,7 @@ mkdir -p data
 ```yaml
 services:
   ssr-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.ghcr
-    image: ssr-server:latest
+    image: ghcr.io/ypkin/serverstatus-rust:latest
     container_name: ssr-server
     restart: unless-stopped
     working_dir: /data
@@ -652,10 +649,21 @@ services:
 ```
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-首次构建约 10–20 分钟（在镜像里编服务端及依赖）。启动后打开 `http://<服务端IP>:8080`，能看到面板即服务端已起。
+无需等待构建，拉取镜像即可启动。启动后打开 `http://<服务端IP>:8080`，能看到面板即服务端已起。镜像是 amd64 + arm64 双架构，x86 与 ARM 机器自动选对版本。`latest` 只在 docker.yml 构建成功后更新（目前需手动触发，master 有新提交不等于 latest 已更新）；以后更新服务端时：`docker compose pull && docker compose up -d`。
+
+**本地构建（只有改了源码才需要，平时不用）：**把上面 `image:` 一行换成下面三行，再 `docker compose up -d --build`：
+
+```yaml
+    build:
+      context: .
+      dockerfile: Dockerfile.ghcr
+    image: ssr-server:latest
+```
+
+首次构建约 10–20 分钟（在镜像里编服务端及依赖；Dockerfile 未做依赖分层缓存，改代码重编也是全量）。完整 release 构建建议 2GB 以上内存；小内存机器先加 swap，或在别的机器上编好再把二进制拷过来。
 
 ### 2. 服务端：裸二进制方式（备选）
 
@@ -827,6 +835,6 @@ Alpine/OpenRC 机器：把上面同一行 ExecStart 写进 `/etc/init.d/stat_cli
 - 限额填 `0` = 不限量，不要填 `9999`。
 - 结束日期不推导；`admin.json` 外改先停服务。
 - 数据目录不要手建空 JSON 文件。
-- 小内存机器构建 OOM：加 swap 或异地构建再拷二进制。
+- 小内存机器不要本地构建（易 OOM），直接 pull 镜像；非要本地构建才加 swap 或异地构建再拷二进制。
 - 旧 overlay / bundle 文件不要删：旧缓存的 HTML 还引用它们，删了会 404。
 - 探针历史只能从部署起攒，过去数据不编造；延迟图档位 1h / 6h / 24h / 7d。
