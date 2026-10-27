@@ -3,9 +3,10 @@
 //
 // The React table renders one row per server; the first cell holds the
 // display name (alias, falling back to the node name) inside a truncated
-// div. Clicking the name cell expands React's own detail row under it;
-// the overlay appends a tabbed detail block inside that wide row
-// while hiding React's own centered detail block there (the user
+// div. Clicking any cell of the row expands React's own detail row
+// under it (bundle: tr onClick); the overlay appends a tabbed detail
+// block inside that wide row while hiding React's own centered
+// detail block there (the user
 // asked to delete the native load/memory/swap/disk/TCP/UDP/latency
 // block and keep only the overlay block): a
 // node summary line, then 网络延迟 / 系统概览 tabs. The latency tab
@@ -119,7 +120,9 @@
   // the light appearance is byte-for-byte unchanged. The tooltip chip
   // keeps its own dark bg + white text (excluded via its fixed
   // position) and the chart svg keeps its own light card (#f9fafb bg,
-  // #9ca3af axis labels), readable as-is, so both are left alone.
+  // #9ca3af axis labels), readable as-is, so it is left alone here;
+  // the chart card's dark colours live separately in
+  // ensureChartDarkStyle (v21: v16 deliberately left the chart light).
   function ensureDetailDarkStyle() {
     if (document.getElementById('ssr-detail-dark')) return;
     var st = document.createElement('style');
@@ -129,6 +132,27 @@
       + '.dark [data-ssr-detail] div:not([style*="position:fixed"]){color:#d1d5db !important;}'
       + '.dark [data-ssr-detail] > div:first-child{color:#f9fafb !important;}'
       + '.dark [data-ssr-detail] button{color:#e5e7eb !important;}';
+    document.head.appendChild(st);
+  }
+
+  // Dark-mode chart card (2026-10-27, v21): the latency chart svg
+  // carries its own light card (inline background #f9fafb, #e5e7eb
+  // grid, #9ca3af ticks), so in dark mode it stayed a white card
+  // under dark detail text. These rules are scoped strictly to
+  // .dark + the chart svg marker (data-ssr-chart, data-ssr-grid),
+  // so light mode is byte-for-byte unchanged: curves keep their
+  // colours, the tooltip keeps its dark chip, the vline keeps
+  // #6b7280 (visible on dark). Inline background beats stylesheets,
+  // hence !important on the card rule; grid/tick rules override
+  // presentation attributes, which lose to any stylesheet rule.
+  function ensureChartDarkStyle() {
+    if (document.getElementById('ssr-chart-dark')) return;
+    var st = document.createElement('style');
+    st.id = 'ssr-chart-dark';
+    st.textContent =
+      '.dark svg[data-ssr-chart]{background:#1e293b !important;}'
+      + '.dark svg[data-ssr-chart] line[data-ssr-grid]{stroke:#374151 !important;}'
+      + '.dark svg[data-ssr-chart] text{fill:#d1d5db !important;}';
     document.head.appendChild(st);
   }
 
@@ -601,12 +625,14 @@
     var svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px;touch-action:pan-y';
+    svg.setAttribute('data-ssr-chart', '');
     for (var tv = 0; tv <= yTop; tv += yStep) {
       var y = PT + (1 - tv / yTop) * (H - PT - PB);
       var ln = document.createElementNS(svgNS, 'line');
       ln.setAttribute('x1', PL); ln.setAttribute('x2', W - PR);
       ln.setAttribute('y1', y); ln.setAttribute('y2', y);
       ln.setAttribute('stroke', '#e5e7eb'); ln.setAttribute('stroke-width', '1');
+      ln.setAttribute('data-ssr-grid', '');
       svg.appendChild(ln);
       var tx = document.createElementNS(svgNS, 'text');
       tx.setAttribute('x', PL - 4); tx.setAttribute('y', y + 4);
@@ -714,8 +740,9 @@
     // the raw mouse x, so line and tip time always agree). Hidden
     // until hover; recreated with every chart render, so a range
     // switch or re-inject can never leave a stale misplaced line.
-    // The card stays light even in dark mode, so one grey works in
-    // both themes; 1px dashed, visible without shouting.
+    // The card goes dark via ssr-chart-dark in dark mode (v21); the
+    // #6b7280 grey stays visible on both light and dark cards, so
+    // one grey works in both themes; 1px dashed, visible without shouting.
     var vline = document.createElementNS(svgNS, 'line');
     vline.setAttribute('data-ssr-vline', '1');
     vline.setAttribute('x1', PL); vline.setAttribute('x2', PL);
@@ -1044,8 +1071,9 @@
   // structure, so the #0/icon tail is hidden too. This runs on EVERY
   // inject pass, open or collapsed: React recreates the native nodes
   // on refresh, so a once-only hide would let them resurrect.
-  // Style-only changes do not trip the MutationObserver loop (it
-  // watches childList only), and the expand row itself is never
+  // Style-only changes do not trip the MutationObserver loop, and
+  // inject() changes no classes, so the class-watching observer
+  // cannot loop on itself either. The expand row itself is never
   // touched, so expand/collapse keeps working.
   function hideNativeDetail(reactTd) {
     if (!reactTd) return;
@@ -1084,14 +1112,18 @@
       handled.add(td);
       // React's own expand row, computed once per row (reused by the
       // indicator and the detail attach below). React toggles
-      // expansion on a WHOLE-ROW click (bundle: tr onClick), while
-      // the overlay's click handler only fires on the alias cell —
-      // so a row click outside the alias cell expands React without
-      // touching expanded[]. The expand row's own class
-      // (visible/collapse) is therefore the source of truth, OR'd
-      // with the overlay map (the map covers the pre-render window:
-      // our click fires before React's class flips). The indicator
-      // follows the same OR, so it never disagrees with React.
+      // expansion on a WHOLE-ROW click (bundle: tr onClick) and the
+      // expand row stays in the DOM, flipping only its class
+      // (visible/collapse) plus the inner div's max-h — a toggle
+      // produces NO childList mutation, so the old childList-only
+      // observer never saw it and the overlay only learned about
+      // non-name clicks on the next 30 s refresh (meanwhile the
+      // native block showed unhidden and the overlay tabs were
+      // missing — exactly the "only name clicks expand" feeling).
+      // The observer now also watches class attributes, and the
+      // overlay map is synced from React's class on every pass
+      // below, so the map, the indicator and the live-tail list
+      // always agree with React no matter which cell was clicked.
       var tr0 = td.closest('tr');
       var expandRow = (tr0 && tr0.nextElementSibling) ? tr0.nextElementSibling : null;
       var reactTd = null;
@@ -1102,6 +1134,18 @@
           reactTd = rtds0[0];
           reactOpen = /(^|\s)visible(\s|$)/.test(expandRow.className || '');
         }
+      }
+      // Single source of truth (v21): React's visible/collapse
+      // class. The map used to toggle only on name-cell clicks, so
+      // it drifted whenever React toggled via any other cell — and
+      // the next refresh then re-attached the block into the
+      // collapsed row and left the indicator wrong. Sync it here so
+      // the map, the indicator and the live-tail list always match
+      // React. Only sync when the expand row has the expected
+      // single-td shape; otherwise leave the map alone.
+      if (reactTd) {
+        if (reactOpen) expanded[srv.name] = true;
+        else delete expanded[srv.name];
       }
       // Hide React's native detail block on every pass (see
       // hideNativeDetail): pre-hiding while collapsed means no flash
@@ -1182,10 +1226,10 @@
       // reactTd/reactOpen/open were computed at the top of this row's
       // pass (React's expand row: next sibling, single colspan td;
       // any other shape is rejected, never attached into). The gate
-      // is `open`, not the overlay map alone: a whole-row click
-      // outside the alias cell expands React without touching
-      // expanded[], and gating on the map alone would render
-      // nothing — exactly the "tabs never appear" shape.
+      // is `open`, which now always equals React's class (the map
+      // is synced from it above), so a whole-row click on any cell
+      // ends up rendering — the old map-only gate rendered nothing
+      // for non-name clicks, exactly the "tabs never appear" shape.
       if (!open) {
         if (reactTd) {
           var stale = reactTd.querySelector('[data-ssr-detail]');
@@ -1226,10 +1270,13 @@
       if (text === s.display) { srv = s; break; }
     }
     if (!srv) return;
-    // Deliberately no stopPropagation/preventDefault: React's own row
-    // click behaviour (if any) must keep working.
-    if (expanded[srv.name]) delete expanded[srv.name];
-    else expanded[srv.name] = true;
+    // Deliberately no stopPropagation/preventDefault and no map
+    // toggle: React owns the toggle (whole-row onClick) and the map
+    // is synced from React's visible/collapse class in inject, so
+    // toggling here as well would double-toggle the map out of
+    // sync. This handler only forces an immediate inject pass; the
+    // class-watching observer covers the flip itself, so a click on
+    // ANY cell — not just the name cell — ends up synced.
     inject();
   }
 
@@ -1308,10 +1355,11 @@
   document.addEventListener('DOMContentLoaded', function () {
     ensureHeaderFixStyle();
     ensureDetailDarkStyle();
+    ensureChartDarkStyle();
     refresh();
     setInterval(refresh, 30000);
     document.addEventListener('click', onDocClick);
-    new MutationObserver(scheduleInject).observe(document.body, { childList: true, subtree: true });
+    new MutationObserver(scheduleInject).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
     setTimeout(inject, 1500);
     setTimeout(inject, 5000);
   });
