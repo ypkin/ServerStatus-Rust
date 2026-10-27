@@ -302,10 +302,7 @@
       lines.push('CPU：' + cpu);
     }
     var tParts = [];
-    if (s.month_rx + s.month_tx > 0) {
-      tParts.push('本月入 ' + fmtGiB(s.month_rx) + ' / 出 ' + fmtGiB(s.month_tx));
-    }
-    tParts.push('本月已用 ' + fmtGiB(s.month_used));
+    tParts.push('已用 ' + fmtGiB(s.month_used));
     // Monthly allowance block: used is month_used (the billing-mode
     // figure the admin correction form sets — never rx+tx); 9999 =
     // unlimited; no limit set = dash, never a fabricated number;
@@ -322,9 +319,7 @@
       tParts.push(tRem >= 0 ? '剩余 ' + fmtGiB(tRem) : '已超 ' + fmtGiB(-tRem));
       tParts.push('每月限制 ' + fmtGiB(tLim));
     }
-    tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
-    tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
-    lines.push('流量：' + tParts.join(' · '));
+    lines.push('本月流量：' + tParts.join(' · '));
     var boot = bootLine(s.uptime_sec);
     if (boot) lines.push(boot);
     if (s.uptime_display) lines.push('在线时长：' + s.uptime_display);
