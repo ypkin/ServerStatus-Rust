@@ -1,7 +1,3 @@
-```dockerfile
-# =========================
-# Stage 1: Build stage
-# =========================
 FROM rust:1.80-bullseye AS builder
 
 WORKDIR /usr/src/serverstatus
