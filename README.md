@@ -203,11 +203,21 @@ server {
 5. **三网探针**：填联通 / 电信 / 移动 × v4 / v6 的探针地址与开关（格式见第 3 节）；后台改完客户端下次上报自动生效，不用逐台改命令行。空配置的列显示 — 属正常未配置，不是故障。
 6. **掉线推送 PushPlus**：填**自己的** token，开关与模板按需改（token 只存服务端，接口不回显）。掉线 / 恢复有默认文案，模板为空时自定义 / 流量告警不发。
 
-## 6. 客户端部署（musl 手动安装；不要用面板的 /i 一键脚本）
+## 6. 客户端部署（预编译包下载安装；不要用面板的 /i 一键脚本）
 
-`/i` 下发的一键脚本从上游 Release 下载客户端（仅 systemd 服务），没有本分支的 ICMP 探针与服务端下发探针；要完整功能必须手动装 musl 版。**客户端没有预编译包**，必须自己构建（或从已装好的节点把二进制拷过来）。
+`/i` 下发的一键脚本从上游 Release 下载客户端（仅 systemd 服务），没有本分支的 ICMP 探针与服务端下发探针；要完整功能必须手动装 musl 版。**预编译包已发布**，推荐直接下载（见下）；只有改源码才需要自己构建（见 6.1）。
 
-### 6.1 构建（构建机上做，不必是节点本身）
+**下载预编译包（推荐）：**
+
+```bash
+mkdir -p /opt/ServerStatus
+curl -L -o /opt/ServerStatus/stat_client https://github.com/ypkin/ServerStatus-Rust/releases/latest/download/stat_client
+chmod +x /opt/ServerStatus/stat_client
+```
+
+固定版本下载把 `latest` 换成标签名，如 `client-v1`：`https://github.com/ypkin/ServerStatus-Rust/releases/download/client-v1/stat_client`。下载后按下面 6.2（systemd）或 6.3（OpenRC）配服务。
+
+### 6.1 自行构建（改源码才需要；构建机上做，不必是节点本身）
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
@@ -287,7 +297,7 @@ rc-service stat_client start
 
 ### 6.5 更新与卸载
 
-更新：重新构建后把新二进制拷过去覆盖，再重启（systemd：`systemctl restart stat_client`；OpenRC：`rc-service stat_client restart`）。
+更新：下载新版 Release 覆盖（或重新构建后覆盖），再重启（systemd：`systemctl restart stat_client`；OpenRC：`rc-service stat_client restart`）。
 
 卸载：先停服务再删文件（systemd：`systemctl disable --now stat_client` 后删 `/etc/systemd/system/stat_client.service` 与 `/opt/ServerStatus/stat_client`；OpenRC：`rc-service stat_client stop && rc-update del stat_client default` 后删 `/etc/init.d/stat_client` 与二进制）。
 
