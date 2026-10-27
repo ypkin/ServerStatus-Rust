@@ -36,6 +36,7 @@
   var GiB = 1024 * 1024 * 1024;
   var planByName = {};
   var expanded = {}; // node name -> true while its detail block is open
+  var accordionPrev = {}; // node name -> true if its detail row was visible at the end of the last inject pass (accordion bookkeeping, v22)
   var activeTag = null; // null = all rows; '' = default group; else a Tag
   var haveStats = false; // true once stats.json has loaded at least once
 
@@ -1097,6 +1098,7 @@
     // Anchor: the alias cell div (class "truncate" inside a td).
     var cells = document.querySelectorAll('td div.truncate');
     var handled = new Set();
+    var accOpen = []; // rows React currently shows open, in DOM order (accordion input, v22)
     cells.forEach(function (div) {
       // Strip our own indicator before matching: after the first inject
       // the div text starts with ▸/▾, which is not part of the name.
@@ -1147,6 +1149,11 @@
         if (reactOpen) expanded[srv.name] = true;
         else delete expanded[srv.name];
       }
+      // Accordion input: rows React currently shows open, in DOM
+      // order (the loop visits name cells in document order).
+      // Only reactOpen counts — React's class is the state;
+      // a stale map entry without a visible row is not open.
+      if (reactOpen && tr0) accOpen.push({ name: srv.name, tr: tr0 });
       // Hide React's native detail block on every pass (see
       // hideNativeDetail): pre-hiding while collapsed means no flash
       // of the native block between a click and the next inject, and
@@ -1257,6 +1264,38 @@
       renderDetailBlock(srv, block);
       reactTd.appendChild(block);
     });
+
+    // Accordion (v22): at most one expanded row at a time. When a
+    // row flips to visible, every OTHER visible row is collapsed by
+    // clicking its main row — React's own toggle, never a direct
+    // state write or class write, and never a new row-click
+    // delegation (a second delegation would double-toggle, the v21
+    // lesson). The keeper is the single newly-visible row when
+    // there is exactly one (the row the user just opened, wherever
+    // it sits in DOM order); otherwise — initial multi-open, or a
+    // failed-collapse retry — the first visible row in DOM order,
+    // deterministically. Collapse flips never retrigger: collapsing
+    // only shrinks the visible set, so the next pass sees no
+    // newly-visible row and takes no action; the cascade
+    // terminates after one pass. Collapsing the only open row
+    // leaves zero open — nothing is ever force-reopened. Runs on
+    // every inject (observer, refresh, startup), so a multi-open
+    // initial state is fixed too; the collapse follows within the
+    // observer's 300 ms debounce.
+    (function accordion() {
+      if (accOpen.length <= 1) {
+        accordionPrev = {};
+        accOpen.forEach(function (r) { accordionPrev[r.name] = true; });
+        return;
+      }
+      var newly = accOpen.filter(function (r) { return !accordionPrev[r.name]; });
+      var keeper = newly.length === 1 ? newly[0] : accOpen[0];
+      accOpen.forEach(function (r) {
+        if (r !== keeper && r.tr && r.tr.click) r.tr.click();
+      });
+      accordionPrev = {};
+      accordionPrev[keeper.name] = true;
+    })();
   }
 
   function onDocClick(e) {
