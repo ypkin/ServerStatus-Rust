@@ -305,10 +305,25 @@
     if (s.month_rx + s.month_tx > 0) {
       tParts.push('本月入 ' + fmtGiB(s.month_rx) + ' / 出 ' + fmtGiB(s.month_tx));
     }
-    tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
     tParts.push('本月已用 ' + fmtGiB(s.month_used));
+    // Monthly allowance block: used is month_used (the billing-mode
+    // figure the admin correction form sets — never rx+tx); 9999 =
+    // unlimited; no limit set = dash, never a fabricated number;
+    // over limit shows the overage.
+    var tLim = s.traffic_limit;
+    if (!tLim) {
+      tParts.push('剩余 —');
+      tParts.push('每月限制 —');
+    } else if (Math.round(tLim / GiB) === 9999) {
+      tParts.push('剩余不限量');
+      tParts.push('每月限制不限量');
+    } else {
+      var tRem = tLim - (s.month_used || 0);
+      tParts.push(tRem >= 0 ? '剩余 ' + fmtGiB(tRem) : '已超 ' + fmtGiB(-tRem));
+      tParts.push('每月限制 ' + fmtGiB(tLim));
+    }
+    tParts.push('累计入 ' + fmtGiB(s.total_rx) + ' / 出 ' + fmtGiB(s.total_tx));
     tParts.push('总量 ' + fmtGiB(s.total_rx + s.total_tx));
-    tParts.push(isUnlimitedTraffic(s.traffic_limit) ? '限额不限量' : '限额 ' + fmtGiB(s.traffic_limit));
     lines.push('流量：' + tParts.join(' · '));
     var boot = bootLine(s.uptime_sec);
     if (boot) lines.push(boot);
@@ -573,7 +588,7 @@
     var svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px;touch-action:pan-y';
-    [0, 0.5, 1].forEach(function (f) {
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
       var y = PT + (1 - f) * (H - PT - PB);
       var ln = document.createElementNS(svgNS, 'line');
       ln.setAttribute('x1', PL); ln.setAttribute('x2', W - PR);
@@ -593,11 +608,63 @@
         ? (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()))
         : (p(d.getHours()) + ':' + p(d.getMinutes()));
     };
-    [t0, (t0 + t1) / 2, t1].forEach(function (ts) {
+    // X ticks: whole-hour anchored (never data-boundary anchored —
+    // that is why 24h used to read 23:24/03:52/08:20). Interval by
+    // range: 1h -> 10min, 6h -> 1h, 24h -> 4h, 7d -> 12h; midnight
+    // ticks on 24h/7d read as dates (day boundaries). If the tick
+    // spacing on the plot would fall below ~36 viewBox units the
+    // interval doubles until labels cannot overlap (doubling keeps
+    // whole-hour anchors); a short window with fewer than two
+    // anchors refines down to 10min instead of going bare.
+    var pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
+    var hhmm = function (ts) { var d = new Date(ts * 1000); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+    var xTickList = function () {
+      var step = st.range <= 1 ? 600 : st.range <= 6 ? 3600 : st.range <= 24 ? 14400 : 43200;
+      var mk = function (stepSec) {
+        var out = [];
+        var d = new Date(t0 * 1000);
+        if (stepSec < 3600) {
+          d.setSeconds(0, 0);
+          d.setMinutes(Math.ceil(d.getMinutes() / (stepSec / 60)) * (stepSec / 60));
+        } else if (stepSec < 86400) {
+          d.setMinutes(0, 0, 0);
+          d.setHours(Math.ceil(d.getHours() / (stepSec / 3600)) * (stepSec / 3600));
+        } else {
+          d.setHours(0, 0, 0, 0);
+        }
+        // Flooring the small fields can land the anchor before t0
+        // (e.g. t0 22:30 -> 22:00 for an hourly step); step forward
+        // until the anchor is inside the window.
+        while (d.getTime() / 1000 < t0) d = new Date(d.getTime() + stepSec * 1000);
+        for (var ts = Math.round(d.getTime() / 1000); ts <= t1; ts += stepSec) out.push(ts);
+        return out;
+      };
+      var ticks = mk(step);
+      var guard = 0;
+      while (ticks.length > 1 && guard++ < 8) {
+        var minGap = Infinity;
+        for (var i = 1; i < ticks.length; i++) minGap = Math.min(minGap, X(ticks[i]) - X(ticks[i - 1]));
+        if (minGap >= 36) break;
+        step *= 2;
+        ticks = mk(step);
+      }
+      guard = 0;
+      while (ticks.length < 2 && step > 600 && guard++ < 8) {
+        step = Math.max(600, step / 2);
+        ticks = mk(step);
+      }
+      if (ticks.length < 2) ticks = [t0, t1];
+      return ticks;
+    };
+    xTickList().forEach(function (ts) {
       var tx = document.createElementNS(svgNS, 'text');
-      tx.setAttribute('x', X(ts)); tx.setAttribute('y', H - 6);
+      tx.setAttribute('x', Math.max(16, Math.min(W - 16, X(ts)))); tx.setAttribute('y', H - 6);
       tx.setAttribute('text-anchor', 'middle'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
-      tx.textContent = fmtT(ts);
+      var d = new Date(ts * 1000);
+      var isMidnight = d.getHours() === 0 && d.getMinutes() === 0;
+      tx.textContent = (st.range >= 24 && isMidnight)
+        ? (pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()))
+        : hhmm(ts);
       svg.appendChild(tx);
     });
     drawn.forEach(function (s, idx) {
@@ -666,8 +733,20 @@
     tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;background:#111827;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;display:none';
     var showTip = function (e) {
       var rect = svg.getBoundingClientRect();
-      if (!rect.width) return;
-      var px = (e.clientX - rect.left) / rect.width * W;
+      if (!rect.width || !rect.height) return;
+      // The svg is width:100% + height:180px over a 600x180 viewBox,
+      // rendered with the default preserveAspectRatio meet: on a
+      // desktop-width container the 600-unit content is centred with
+      // empty margins, so (clientX-left)/width*W points at the wrong
+      // column — the tip box still sits on the mouse, which is why
+      // the tip looked right while the line landed elsewhere (the
+      // 08:20 tip / 3/4 line screenshot). Map through the real
+      // content rect instead; on narrow screens this reduces to
+      // exactly the old formula.
+      var vScale = Math.min(rect.width / W, rect.height / H);
+      if (!(vScale > 0)) return;
+      var vOffX = (rect.width - W * vScale) / 2;
+      var px = (e.clientX - rect.left - vOffX) / vScale;
       var ts = t0 + (px - PL) / (W - PL - PR) * (t1 - t0);
       // Value lookup at a timestamp: each series contributes its
       // nearest point's raw bucket value (null = gap bucket -> dash).
