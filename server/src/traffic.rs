@@ -22,17 +22,13 @@ use std::sync::{LazyLock, Mutex};
 
 const TRAFFIC_FILE: &str = "traffic.json";
 
-/// Admin-form spelling of "unlimited": 9999 GiB, in bytes. The form
-/// stores GiB as bytes, so 9999 entered there lands here exactly; 0
-/// keeps its existing unlimited meaning and is NOT changed by this.
-/// Every consumer (percent, alerts, displays) must use is_unlimited
-/// instead of comparing against 0, or 9999 would be treated as a real
-/// 9999 GiB quota and yield a tiny bogus percent.
-pub const UNLIMITED_LIMIT_BYTES: u64 = 9999 * 1024 * 1024 * 1024;
-
-/// True for both unlimited spellings: 0 (old) and 9999 GiB (form).
+/// Unlimited traffic is spelled 0: the admin form's limit field uses
+/// 0 for unlimited (its placeholder says so), and every consumer
+/// (percent, alerts, displays) must use is_unlimited instead of
+/// comparing against 0 directly. A literal 9999 GiB is a real quota,
+/// not unlimited.
 pub fn is_unlimited(limit_bytes: u64) -> bool {
-    limit_bytes == 0 || limit_bytes == UNLIMITED_LIMIT_BYTES
+    limit_bytes == 0
 }
 
 /// One host's accounting row. All byte counters are u64 and only ever grow
@@ -379,10 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn unlimited_limit_spellings() {
+    fn unlimited_is_zero_only() {
+        // Only 0 means unlimited; 9999 GiB is a real quota.
         assert!(is_unlimited(0));
-        assert!(is_unlimited(UNLIMITED_LIMIT_BYTES));
-        assert!(is_unlimited(9999 * 1024 * 1024 * 1024));
+        assert!(!is_unlimited(9999 * 1024 * 1024 * 1024));
         assert!(!is_unlimited(9998 * 1024 * 1024 * 1024));
         assert!(!is_unlimited(1000 * 1024 * 1024 * 1024));
         assert!(!is_unlimited(1));

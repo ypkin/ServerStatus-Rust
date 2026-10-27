@@ -315,9 +315,8 @@ impl StatsMgr {
                             stat_t.last_network_in = stat_t.network_in.saturating_sub(st.month_rx);
                             stat_t.last_network_out = stat_t.network_out.saturating_sub(st.month_tx);
                             // Deduped allowance alert (monitor model).
-                            // Unlimited nodes (0, or 9999 GiB from the
-                            // admin form) never alert: there is no quota
-                            // to cross.
+                            // Unlimited nodes (limit 0) never alert:
+                            // there is no quota to cross.
                             if !crate::traffic::is_unlimited(traffic_limit) {
                                 let used = crate::traffic::month_used(st.month_rx, st.month_tx, &traffic_mode);
                                 let step = crate::traffic::TrafficState::alert_step(

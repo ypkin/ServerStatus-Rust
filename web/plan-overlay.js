@@ -249,10 +249,10 @@
     return ' (' + (Math.round(used / total * 1000) / 10) + '%)';
   }
 
-  // Unlimited traffic spellings: 0 (old) and 9999 GiB (admin form).
-  // 9999 must never render as a quota (see traffic::is_unlimited).
+  // Unlimited traffic is spelled 0 only (see traffic::is_unlimited).
+  // A literal 9999 GiB renders as a real quota.
   function isUnlimitedTraffic(bytes) {
-    return !bytes || Math.round(bytes / GiB) === 9999;
+    return !bytes;
   }
 
   function planLine(s) {
@@ -329,14 +329,10 @@
     var tParts = [];
     tParts.push('已用 ' + fmtGiB(s.month_used));
     // Monthly allowance block: used is month_used (the billing-mode
-    // figure the admin correction form sets — never rx+tx); 9999 =
-    // unlimited; no limit set = dash, never a fabricated number;
-    // over limit shows the overage.
+    // figure the admin correction form sets — never rx+tx); 0 =
+    // unlimited; over limit shows the overage.
     var tLim = s.traffic_limit;
     if (!tLim) {
-      tParts.push('剩余 —');
-      tParts.push('每月限制 —');
-    } else if (Math.round(tLim / GiB) === 9999) {
       tParts.push('剩余不限量');
       tParts.push('每月限制不限量');
     } else {

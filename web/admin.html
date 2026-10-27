@@ -83,7 +83,7 @@ label{display:inline-block;min-width:96px}
       <label>服务器分组 Tag</label><input id="f_tag" placeholder="如 Stable，空为默认组"><br>
       <label>地区</label><input id="f_location"> <label>类型</label><input id="f_type" placeholder="如 kvm">
       <label>排序</label><input id="f_weight" type="number" min="0" placeholder="留空自动"><br>
-      <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量"> <span class="hint">填 9999 表示不限量</span>
+      <label>流量限额 GiB</label><input id="f_limit" type="number" min="0" value="0" placeholder="0=不限量"> <span class="hint">填 0 表示不限量</span>
       <label>计费模式</label><select id="f_mode"><option value="sum">sum 双向</option><option value="up">up 仅上行</option><option value="down">down 仅下行</option><option value="max">max 取大者</option></select>
       <label>重置日</label><input id="f_ms" type="number" min="1" max="31" value="1"><br>
       <label>开始日期</label><input id="f_start" type="date"> <label>结束日期</label><input id="f_end" type="date"> <label>年费</label><input id="f_fee" type="number" step="0.01" min="0" placeholder="如 15.99"><select id="f_cur" onchange="toggleCurCustom()"><option value="$">美元 $</option><option value="¥">人民币 ¥</option><option value="£">英镑 £</option><option value="€">欧元 €</option><option value="custom">自定义</option></select><input id="f_cur_custom" placeholder="自定义符号，如 HK$" style="display:none"> <label>带宽</label><input id="f_bw" type="number" min="0" placeholder="如 1000"><select id="f_bw_unit"><option value="1">Mbps</option><option value="1000">Gbps</option><option value="1000000">Tbps</option></select><br>
@@ -429,15 +429,14 @@ function hostFormCurrency(){
   if ($('f_cur').value === 'custom') return $('f_cur_custom').value.trim();
   return $('f_cur').value;
 }
-// Unlimited traffic spellings: 0 (old) and 9999 GiB (form). 9999 must
-// never render as a quota: the table shows 不限量, the percent stays 0
-// server-side, and alerts skip the node (see traffic::is_unlimited).
+// Unlimited traffic is spelled 0 only (see traffic::is_unlimited):
+// the table shows 不限量, the percent stays 0 server-side, and
+// alerts skip the node. A literal 9999 GiB shows as 9999.
 function isUnlimitedLimit(bytes){
-  return !bytes || Math.round(bytes / GiB) === 9999;
+  return !bytes;
 }
 function limitCell(bytes){
-  // Only the 9999 spelling changes display: 0 keeps showing 0 as before.
-  return Math.round(bytes / GiB) === 9999 ? '不限量' : Math.round(bytes / GiB);
+  return !bytes ? '不限量' : Math.round(bytes / GiB);
 }
 // Bandwidth display: adaptive unit, storage stays Mbps.
 // <1000 -> Mbps, >=1000 -> Gbps, >=1000000 -> Tbps; values are
