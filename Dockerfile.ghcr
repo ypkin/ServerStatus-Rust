@@ -5,10 +5,12 @@ FROM rust:1.99-bookworm AS builder
 
 WORKDIR /usr/src/serverstatus
 
-# 安装编译依赖
+# 安装编译依赖（protobuf-src 需用 cmake 从源码编 protobuf，另补 C/C++ 工具链）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    cmake \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制源码并编译（只编服务端；客户端不进最终镜像，不编它）
