@@ -68,6 +68,19 @@ static ADMIN: LazyLock<Mutex<AdminStore>> = LazyLock::new(Default::default);
 
 /// Load `admin.json` if present. Call once at startup, after `G_CONFIG` is
 /// set; before that, effective settings fall back to config defaults.
+///
+/// Invariant (user rule, 2026-10-27): `plan_end_date` is never derived.
+/// An empty end stays empty through load/save round-trips; a filled end
+/// is kept verbatim. Nothing in this file computes an end date from the
+/// start date, the fee, or anything else.
+///
+/// Footgun, proven 2026-10-27: `ADMIN` is loaded once here and then held
+/// in memory. Editing `admin.json` on disk while the server runs does NOT
+/// update memory, and the next admin API save rewrites the whole file
+/// from stale memory — silently resurrecting values removed on disk
+/// (that is how six emptied `plan_end_date` values came back on
+/// 2026-10-27). External edits to `admin.json` therefore require a
+/// restart (stop → edit → start) so memory reloads the edited file.
 pub fn init_admin_store() {
     let mut store = AdminStore::default();
     if let Ok(contents) = fs::read_to_string(ADMIN_FILE) {
@@ -1080,4 +1093,85 @@ pub async fn put_pushplus(_claims: jwt::Claims, Json(body): Json<PushPlusPutBody
     }
     crate::notifier::pushplus::apply_pushplus_config(p);
     (StatusCode::OK, axum::Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host_with_dates(name: &str, start: &str, end: &str) -> Host {
+        Host {
+            name: name.to_string(),
+            plan_start_date: start.to_string(),
+            plan_end_date: end.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Save/load round-trip (serde_json::to_string / from_str, exactly what
+    /// save_admin_store / init_admin_store do) must never fill an empty
+    /// plan_end_date. Regression test for the 2026-10-27 incident, where
+    /// six emptied end dates reappeared in admin.json.
+    #[test]
+    fn empty_end_date_survives_save_load_round_trip() {
+        let mut store = AdminStore::default();
+        store.admin_hosts.push(host_with_dates("kuroit", "2025-12-01", ""));
+        store.admin_hosts.push(host_with_dates("exact", "2026-06-15", ""));
+        store.admin_hosts.push(host_with_dates("cheap-jp", "2026-10-01", ""));
+        let saved = serde_json::to_string(&store).unwrap();
+        let reloaded: AdminStore = serde_json::from_str(&saved).unwrap();
+        for h in &reloaded.admin_hosts {
+            assert_eq!(h.plan_end_date, "", "end date filled for {}", h.name);
+        }
+        // Start dates ride along untouched.
+        assert_eq!(reloaded.admin_hosts[0].plan_start_date, "2025-12-01");
+        assert_eq!(reloaded.admin_hosts[1].plan_start_date, "2026-06-15");
+    }
+
+    /// A filled end date survives the same round-trip verbatim.
+    #[test]
+    fn filled_end_date_survives_save_load_round_trip() {
+        let mut store = AdminStore::default();
+        store.admin_hosts.push(host_with_dates("sailor", "2025-12-12", "2026-12-12"));
+        let saved = serde_json::to_string(&store).unwrap();
+        let reloaded: AdminStore = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.admin_hosts[0].plan_end_date, "2026-12-12");
+    }
+
+    /// The incident file shape: six hosts with starts set and ends empty,
+    /// plus a traffic override, must round-trip with ends still empty
+    /// and the override intact.
+    #[test]
+    fn incident_shape_round_trip_keeps_ends_empty() {
+        let mut store = AdminStore::default();
+        for (name, start) in [
+            ("56idc", "2026-05-24"),
+            ("cheap-jp", "2026-10-01"),
+            ("cheap-sg", "2026-10-01"),
+            ("exact", "2026-06-15"),
+            ("kuroit", "2025-12-01"),
+            ("sailor", "2025-12-12"),
+        ] {
+            store.admin_hosts.push(host_with_dates(name, start, ""));
+        }
+        store.hosts.insert(
+            "cdt".to_string(),
+            HostTrafficOverride {
+                traffic_limit: 200 * 1024 * 1024 * 1024,
+                traffic_mode: "up".to_string(),
+                monthstart: 20,
+            },
+        );
+        let saved = serde_json::to_string(&store).unwrap();
+        let reloaded: AdminStore = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.admin_hosts.len(), 6);
+        for h in &reloaded.admin_hosts {
+            assert_eq!(h.plan_end_date, "", "end date filled for {}", h.name);
+            assert!(!h.plan_start_date.is_empty());
+        }
+        assert_eq!(
+            reloaded.hosts["cdt"].traffic_limit,
+            200 * 1024 * 1024 * 1024
+        );
+    }
 }
