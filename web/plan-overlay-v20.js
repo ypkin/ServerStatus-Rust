@@ -573,18 +573,36 @@
     var ymax = 0;
     drawn.forEach(function (s) { s.vals.forEach(function (v) { if (v !== null && v > ymax) ymax = v; }); });
     ymax = Math.max(50, Math.ceil(ymax * 1.1));
+    // Nice y ticks (never fractional equal divisions like
+    // 0/146/291/437/582): step from 1/2/5 x 10^n, first step whose
+    // interval count ceil(ymax/step) is <= 6 (5-7 levels; 582 ->
+    // 100 -> 0..600, 390 -> 100 -> 0..400, 150 -> 50 -> 0..150).
+    // The scale top is the nice top, so data rescales to it.
+    var yStep = 10, yTop = ymax;
+    (function () {
+      var pow = 1;
+      while (true) {
+        var ms = [1, 2, 5];
+        for (var mi = 0; mi < ms.length; mi++) {
+          var st = ms[mi] * pow;
+          var top = Math.ceil(ymax / st) * st;
+          if (top / st <= 6) { yStep = st; yTop = top; return; }
+        }
+        pow *= 10;
+      }
+    })();
     var t0 = Infinity, t1 = 0;
     drawn.forEach(function (s) { s.points.forEach(function (p) { if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0]; }); });
     if (t1 <= t0) t1 = t0 + 60;
     var W = 600, H = 180, PL = 44, PR = 8, PT = 8, PB = 20;
     var X = function (ts) { return PL + (ts - t0) / (t1 - t0) * (W - PL - PR); };
-    var Y = function (v) { return PT + (1 - v / ymax) * (H - PT - PB); };
+    var Y = function (v) { return PT + (1 - v / yTop) * (H - PT - PB); };
     var svgNS = 'http://www.w3.org/2000/svg';
     var svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     svg.style.cssText = 'width:100%;height:180px;display:block;background:#f9fafb;border-radius:6px;touch-action:pan-y';
-    [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
-      var y = PT + (1 - f) * (H - PT - PB);
+    for (var tv = 0; tv <= yTop; tv += yStep) {
+      var y = PT + (1 - tv / yTop) * (H - PT - PB);
       var ln = document.createElementNS(svgNS, 'line');
       ln.setAttribute('x1', PL); ln.setAttribute('x2', W - PR);
       ln.setAttribute('y1', y); ln.setAttribute('y2', y);
@@ -593,9 +611,9 @@
       var tx = document.createElementNS(svgNS, 'text');
       tx.setAttribute('x', PL - 4); tx.setAttribute('y', y + 4);
       tx.setAttribute('text-anchor', 'end'); tx.setAttribute('font-size', '10'); tx.setAttribute('fill', '#9ca3af');
-      tx.textContent = Math.round(ymax * f) + 'ms';
+      tx.textContent = tv + 'ms';
       svg.appendChild(tx);
-    });
+    }
     var fmtT = function (ts) {
       var d = new Date(ts * 1000);
       var p = function (n) { return (n < 10 ? '0' : '') + n; };
@@ -605,7 +623,7 @@
     };
     // X ticks: whole-hour anchored (never data-boundary anchored —
     // that is why 24h used to read 23:24/03:52/08:20). Interval by
-    // range: 1h -> 10min, 6h -> 1h, 24h -> 4h, 7d -> 12h; midnight
+    // range: 1h -> 5min, 6h -> 30min, 24h -> 2h, 7d -> 12h; midnight
     // ticks on 24h/7d read as dates (day boundaries). If the tick
     // spacing on the plot would fall below ~36 viewBox units the
     // interval doubles until labels cannot overlap (doubling keeps
@@ -614,7 +632,7 @@
     var pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
     var hhmm = function (ts) { var d = new Date(ts * 1000); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
     var xTickList = function () {
-      var step = st.range <= 1 ? 600 : st.range <= 6 ? 3600 : st.range <= 24 ? 14400 : 43200;
+      var step = st.range <= 1 ? 300 : st.range <= 6 ? 1800 : st.range <= 24 ? 7200 : 43200;
       var mk = function (stepSec) {
         var out = [];
         var d = new Date(t0 * 1000);
